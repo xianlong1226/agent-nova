@@ -28,8 +28,11 @@ __export(index_exports, {
   ProviderRouter: () => import_providers.ProviderRouter,
   SkillLoader: () => import_skills.SkillLoader,
   SkillRegistry: () => import_skills.SkillRegistry,
+  StructuredLogger: () => import_core2.StructuredLogger,
   ToolEngine: () => import_tools.ToolEngine,
   ToolRegistry: () => import_tools.ToolRegistry,
+  TraceCollector: () => import_core2.TraceCollector,
+  TraceReplay: () => import_core2.TraceReplay,
   WorkingMemory: () => import_memory.WorkingMemory,
   claudeHaiku35: () => import_providers2.claudeHaiku35,
   claudeSonnet4: () => import_providers2.claudeSonnet4,
@@ -47,6 +50,7 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 var import_core = require("@agentnova/core");
+var import_core2 = require("@agentnova/core");
 var import_tools = require("@agentnova/tools");
 var import_tools2 = require("@agentnova/tools");
 var import_permission = require("@agentnova/permission");
@@ -54,7 +58,7 @@ var import_memory = require("@agentnova/memory");
 var import_skills = require("@agentnova/skills");
 var import_providers = require("@agentnova/providers");
 var import_providers2 = require("@agentnova/providers");
-var import_core2 = require("@agentnova/core");
+var import_core3 = require("@agentnova/core");
 var import_tools3 = require("@agentnova/tools");
 function quickAgent(config) {
   if (!config.router && !config.model) {
@@ -73,7 +77,7 @@ function quickAgent(config) {
     tools,
     permissions: config.permissions
   };
-  return (0, import_core2.createAgent)(agentConfig);
+  return (0, import_core3.createAgent)(agentConfig);
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
@@ -86,8 +90,11 @@ function quickAgent(config) {
   ProviderRouter,
   SkillLoader,
   SkillRegistry,
+  StructuredLogger,
   ToolEngine,
   ToolRegistry,
+  TraceCollector,
+  TraceReplay,
   WorkingMemory,
   claudeHaiku35,
   claudeSonnet4,

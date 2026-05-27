@@ -8,6 +8,10 @@ export { ContextManager, DEFAULT_CONTEXT_CONFIG } from './context.js'
 export { UsageTracker, ResourceLimitError, getPricing, PROVIDER_PRICING } from './usage.js'
 export type { TokenPrice, UsageSnapshot } from './usage.js'
 
+// ─── Trace & Logging ───────────────────────────────────────────────
+export { TraceCollector, TraceReplay, StructuredLogger } from './trace.js'
+export type { Trace, TraceEntry, LogEntry, LogLevel } from './trace.js'
+
 // ─── Types ─────────────────────────────────────────────────────────
 export type {
   AgentConfig,

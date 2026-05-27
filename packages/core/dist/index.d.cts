@@ -148,6 +148,81 @@ interface AgentResult {
     usage?: UsageSnapshot;
 }
 
+interface TraceEntry {
+    type: 'step' | 'tool_call' | 'tool_result' | 'llm_call' | 'compression' | 'skill' | 'provider_fallback';
+    timestamp: number;
+    data: Record<string, unknown>;
+}
+interface Trace {
+    id: string;
+    startTime: number;
+    endTime: number;
+    entries: TraceEntry[];
+    steps: StepInfo[];
+    totalTokens: number;
+    totalCost: number;
+    provider: string;
+}
+declare class TraceCollector {
+    private entries;
+    private startTime;
+    private traceId;
+    private providerId;
+    constructor(providerId: string);
+    /** Record a trace entry */
+    record(type: TraceEntry['type'], data: Record<string, unknown>): void;
+    /** Build final trace snapshot */
+    buildTrace(steps: StepInfo[], totalTokens: number, totalCost: number): Trace;
+    /** Reset for new run */
+    reset(providerId?: string): void;
+    /** Get raw entries (for streaming consumption) */
+    getEntries(): ReadonlyArray<TraceEntry>;
+}
+declare class TraceReplay {
+    private trace;
+    constructor(trace: Trace);
+    /** Replay trace step by step */
+    replay(options?: {
+        onStep?: (entry: TraceEntry, index: number) => void;
+        delayMs?: number;
+    }): Promise<void>;
+    /** Get summary string */
+    summary(): string;
+    /** Export as JSON */
+    toJSON(): string;
+}
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+interface LogEntry {
+    level: LogLevel;
+    timestamp: number;
+    message: string;
+    data?: Record<string, unknown>;
+    traceId?: string;
+}
+declare class StructuredLogger {
+    private logs;
+    private minLevel;
+    private traceId?;
+    private levelPriority;
+    constructor(options?: {
+        minLevel?: LogLevel;
+        traceId?: string;
+    });
+    debug(message: string, data?: Record<string, unknown>): void;
+    info(message: string, data?: Record<string, unknown>): void;
+    warn(message: string, data?: Record<string, unknown>): void;
+    error(message: string, data?: Record<string, unknown>): void;
+    private log;
+    /** Get all logs */
+    getLogs(level?: LogLevel): ReadonlyArray<LogEntry>;
+    /** Export logs as newline-delimited JSON */
+    exportNDJSON(): string;
+    /** Clear logs */
+    clear(): void;
+    /** Set trace ID for correlation */
+    setTraceId(id: string): void;
+}
+
 declare class Agent {
     private registry;
     private engine;
@@ -155,6 +230,8 @@ declare class Agent {
     private router;
     private contextMgr;
     private usage;
+    private tracer;
+    private logger;
     private systemPrompt;
     private workingDir;
     private permissions;
@@ -185,6 +262,12 @@ declare class Agent {
     getState(): Readonly<AgentState>;
     getUsage(): UsageSnapshot;
     abort(): void;
+    /** Get execution trace */
+    getTrace(): Trace;
+    /** Get trace replay */
+    replayTrace(): TraceReplay;
+    /** Get structured logger */
+    getLogger(): StructuredLogger;
     /** Store a memory item */
     remember(key: string, content: string, layer?: 'working' | 'project' | 'longterm'): Promise<void>;
     private injectMemories;
@@ -252,4 +335,4 @@ declare class ContextManager {
 }
 declare const DEFAULT_CONTEXT_CONFIG: ContextConfig;
 
-export { Agent, type AgentConfig, type AgentEvent, type AgentEventName, type AgentResult, type AgentRunOptions, type AgentState, type CompressionStrategy, type ContextConfig, ContextManager, DEFAULT_CONTEXT_CONFIG, type EventHandler, type HookContext, type HookFn, type HookName, PROVIDER_PRICING, ResourceLimitError, type StepInfo, type TokenPrice, type UsageSnapshot, UsageTracker, createAgent, getPricing };
+export { Agent, type AgentConfig, type AgentEvent, type AgentEventName, type AgentResult, type AgentRunOptions, type AgentState, type CompressionStrategy, type ContextConfig, ContextManager, DEFAULT_CONTEXT_CONFIG, type EventHandler, type HookContext, type HookFn, type HookName, type LogEntry, type LogLevel, PROVIDER_PRICING, ResourceLimitError, type StepInfo, StructuredLogger, type TokenPrice, type Trace, TraceCollector, type TraceEntry, TraceReplay, type UsageSnapshot, UsageTracker, createAgent, getPricing };

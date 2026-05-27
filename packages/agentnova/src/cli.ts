@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * AgentNova CLI — Quick scaffolding for agent projects
+ * AgentNova CLI — Quick scaffolding & skill management
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
@@ -106,6 +106,99 @@ console.log('📊 Steps:', result.steps.length, '| Tokens:', result.state.totalT
 `)
 }
 
+// ─── skill commands ────────────────────────────────────────────────
+
+async function skillCommand() {
+  const sub = args[1]
+  const skillsDir = resolve('skills')
+
+  // Dynamic import to avoid loading unless needed
+  const { SkillRegistry } = await import('@agentnova/skills')
+  const registry = new SkillRegistry({ skillsDir })
+  await registry.load()
+
+  switch (sub) {
+    case 'list':
+    case 'ls': {
+      const skills = registry.list()
+      if (skills.length === 0) {
+        console.log('📋 No skills installed. Use `agentnova skill install <source>` to add one.')
+        break
+      }
+      console.log('📋 Installed skills:\n')
+      for (const s of skills) {
+        console.log(`  ${s.name} v${s.version} — ${s.description}`)
+        if (s.tags?.length) console.log(`    tags: ${s.tags.join(', ')}`)
+      }
+      break
+    }
+
+    case 'search': {
+      const query = args.slice(2).join(' ')
+      if (!query) {
+        console.error('❌ Usage: agentnova skill search <query>')
+        process.exit(1)
+      }
+      const results = registry.search(query)
+      if (results.length === 0) {
+        console.log(`🔍 No skills matching "${query}"`)
+      } else {
+        console.log(`🔍 Skills matching "${query}":\n`)
+        for (const s of results) {
+          console.log(`  ${s.name} v${s.version} — ${s.description}`)
+        }
+      }
+      break
+    }
+
+    case 'install':
+    case 'add': {
+      const source = args[2]
+      if (!source) {
+        console.error('❌ Usage: agentnova skill install <git-repo-or-npm-package>')
+        process.exit(1)
+      }
+      console.log(`📥 Installing skill from: ${source}`)
+      try {
+        const manifest = await registry.install(source)
+        console.log(`✅ Installed: ${manifest.name} v${manifest.version}`)
+        console.log(`   ${manifest.description}`)
+      } catch (err: any) {
+        console.error(`❌ Install failed: ${err.message}`)
+        process.exit(1)
+      }
+      break
+    }
+
+    case 'uninstall':
+    case 'remove':
+    case 'rm': {
+      const name = args[2]
+      if (!name) {
+        console.error('❌ Usage: agentnova skill uninstall <name>')
+        process.exit(1)
+      }
+      const removed = await registry.uninstall(name)
+      if (removed) {
+        console.log(`🗑️  Uninstalled: ${name}`)
+      } else {
+        console.log(`⚠️  Skill "${name}" not found`)
+      }
+      break
+    }
+
+    default:
+      console.log(`
+⚡ Skill commands:
+
+  agentnova skill list             List installed skills
+  agentnova skill search <query>   Search skills
+  agentnova skill install <src>    Install from git repo or npm
+  agentnova skill uninstall <name> Remove a skill
+`)
+  }
+}
+
 // ─── Main ──────────────────────────────────────────────────────────
 
 if (!command) {
@@ -113,7 +206,14 @@ if (!command) {
 🔮 AgentNova CLI
 
 Commands:
-  create <name>    Create a new agent project
+  create <name>         Create a new agent project
+  skill <subcommand>    Manage skills
+  
+  Skill subcommands:
+    list                List installed skills
+    search <query>      Search available skills
+    install <source>    Install a skill
+    uninstall <name>    Remove a skill
 `)
   process.exit(0)
 }
@@ -127,6 +227,14 @@ switch (command) {
     }
     createProject(args[1])
     break
+
+  case 'skill':
+    skillCommand().catch(err => {
+      console.error(`❌ ${err.message}`)
+      process.exit(1)
+    })
+    break
+
   default:
     console.error(`❌ Unknown command: "${command}"`)
     process.exit(1)

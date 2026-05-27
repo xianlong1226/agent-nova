@@ -313,6 +313,175 @@ function createToolContext(state, workingDir, abortSignal, approvalFn) {
   };
 }
 
+// src/trace.ts
+var TraceCollector = class {
+  entries = [];
+  startTime = Date.now();
+  traceId;
+  providerId;
+  constructor(providerId) {
+    this.traceId = `trace_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    this.providerId = providerId;
+  }
+  /** Record a trace entry */
+  record(type, data) {
+    this.entries.push({ type, timestamp: Date.now(), data });
+  }
+  /** Build final trace snapshot */
+  buildTrace(steps, totalTokens, totalCost) {
+    return {
+      id: this.traceId,
+      startTime: this.startTime,
+      endTime: Date.now(),
+      entries: this.entries,
+      steps,
+      totalTokens,
+      totalCost,
+      provider: this.providerId
+    };
+  }
+  /** Reset for new run */
+  reset(providerId) {
+    this.entries = [];
+    this.startTime = Date.now();
+    this.traceId = `trace_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    if (providerId) this.providerId = providerId;
+  }
+  /** Get raw entries (for streaming consumption) */
+  getEntries() {
+    return this.entries;
+  }
+};
+var TraceReplay = class {
+  constructor(trace) {
+    this.trace = trace;
+  }
+  trace;
+  /** Replay trace step by step */
+  async replay(options) {
+    const delay = options?.delayMs ?? 100;
+    for (let i = 0; i < this.trace.entries.length; i++) {
+      const entry = this.trace.entries[i];
+      options?.onStep?.(entry, i);
+      if (delay > 0 && i < this.trace.entries.length - 1) {
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+  /** Get summary string */
+  summary() {
+    const lines = [
+      `Trace: ${this.trace.id}`,
+      `Provider: ${this.trace.provider}`,
+      `Duration: ${this.trace.endTime - this.trace.startTime}ms`,
+      `Steps: ${this.trace.steps.length}`,
+      `Tokens: ${this.trace.totalTokens}`,
+      `Cost: $${this.trace.totalCost.toFixed(4)}`,
+      ""
+    ];
+    for (const entry of this.trace.entries) {
+      const ts = new Date(entry.timestamp).toISOString().slice(11, 23);
+      switch (entry.type) {
+        case "step":
+          lines.push(`[${ts}] STEP #${entry.data.step}`);
+          break;
+        case "tool_call":
+          lines.push(`[${ts}] \u{1F527} ${entry.data.tool}(${JSON.stringify(entry.data.args)?.slice(0, 80)})`);
+          break;
+        case "tool_result":
+          lines.push(`[${ts}] \u{1F4E4} ${entry.data.tool}: ${entry.data.error ? `\u274C ${entry.data.error}` : "\u2705"}`);
+          break;
+        case "llm_call":
+          lines.push(`[${ts}] \u{1F916} LLM call (${entry.data.tokens} tokens)`);
+          break;
+        case "compression":
+          lines.push(`[${ts}] \u{1F5DC}\uFE0F Context compressed`);
+          break;
+        case "skill":
+          lines.push(`[${ts}] \u26A1 Skill ${entry.data.action}: ${entry.data.name}`);
+          break;
+        case "provider_fallback":
+          lines.push(`[${ts}] \u{1F504} Fallback: ${entry.data.from} \u2192 next (${entry.data.error})`);
+          break;
+      }
+    }
+    return lines.join("\n");
+  }
+  /** Export as JSON */
+  toJSON() {
+    return JSON.stringify(this.trace, null, 2);
+  }
+};
+var StructuredLogger = class {
+  logs = [];
+  minLevel;
+  traceId;
+  levelPriority = {
+    debug: 0,
+    info: 1,
+    warn: 2,
+    error: 3
+  };
+  constructor(options) {
+    this.minLevel = options?.minLevel ?? "info";
+    this.traceId = options?.traceId;
+  }
+  debug(message, data) {
+    this.log("debug", message, data);
+  }
+  info(message, data) {
+    this.log("info", message, data);
+  }
+  warn(message, data) {
+    this.log("warn", message, data);
+  }
+  error(message, data) {
+    this.log("error", message, data);
+  }
+  log(level, message, data) {
+    if (this.levelPriority[level] < this.levelPriority[this.minLevel]) return;
+    const entry = {
+      level,
+      timestamp: Date.now(),
+      message,
+      data,
+      traceId: this.traceId
+    };
+    this.logs.push(entry);
+    const prefix = `[${level.toUpperCase()}]`;
+    const ts = new Date(entry.timestamp).toISOString().slice(11, 23);
+    const dataStr = data ? ` ${JSON.stringify(data)}` : "";
+    const output = `${prefix} ${ts} ${message}${dataStr}`;
+    switch (level) {
+      case "error":
+        console.error(output);
+        break;
+      case "warn":
+        console.warn(output);
+        break;
+      default:
+        console.log(output);
+    }
+  }
+  /** Get all logs */
+  getLogs(level) {
+    if (level) return this.logs.filter((l) => l.level === level);
+    return this.logs;
+  }
+  /** Export logs as newline-delimited JSON */
+  exportNDJSON() {
+    return this.logs.map((l) => JSON.stringify(l)).join("\n");
+  }
+  /** Clear logs */
+  clear() {
+    this.logs = [];
+  }
+  /** Set trace ID for correlation */
+  setTraceId(id) {
+    this.traceId = id;
+  }
+};
+
 // src/agent.ts
 import { WorkingMemory, ProjectMemory, MemoryInjector, LongTermMemory } from "@agentnova/memory";
 var Agent = class {
@@ -322,6 +491,8 @@ var Agent = class {
   router;
   contextMgr;
   usage;
+  tracer;
+  logger;
   systemPrompt;
   workingDir;
   permissions;
@@ -358,6 +529,8 @@ var Agent = class {
     this.limits = { ...DEFAULT_LIMITS, ...this.permissions.limits };
     const provider = this.router.getDefault();
     this.usage = new UsageTracker(getPricing(provider.id), this.limits);
+    this.tracer = new TraceCollector(provider.id);
+    this.logger = new StructuredLogger({ traceId: this.tracer["traceId"] });
     this.workingMemory = new WorkingMemory();
     this.projectMemory = new ProjectMemory(this.workingDir);
     this.projectMemory.load();
@@ -505,6 +678,18 @@ var Agent = class {
   abort() {
     this.state.aborted = true;
   }
+  /** Get execution trace */
+  getTrace() {
+    return this.tracer.buildTrace(this.steps, this.usage.totalTokens, this.usage.estimatedCost);
+  }
+  /** Get trace replay */
+  replayTrace() {
+    return new TraceReplay(this.getTrace());
+  }
+  /** Get structured logger */
+  getLogger() {
+    return this.logger;
+  }
   /** Store a memory item */
   async remember(key, content, layer) {
     await this.memoryInjector.store(key, content, { layer });
@@ -535,45 +720,65 @@ var Agent = class {
     const aiTools = this.buildAITools();
     await this.runHook("onBeforeLLMCall", { agentState: this.state, step: this.state.step, messages: this.messages });
     this.emit("llm:call", { step: this.state.step, messageCount: this.messages.length });
-    const provider = this.router.getDefault();
     const stepStart = Date.now();
-    const result = await generateText({
-      model: provider.model,
-      system: this.systemPrompt,
-      messages: this.messages.slice(1),
-      tools: aiTools,
-      abortSignal: options?.signal
-    });
-    return this.processStepResult(result.text, result.toolCalls, result.usage, stepStart, options);
+    const fallbackChain = this.router.getFallbackChain();
+    let lastError;
+    for (const provider of fallbackChain) {
+      try {
+        const result = await generateText({
+          model: provider.model,
+          system: this.systemPrompt,
+          messages: this.messages.slice(1),
+          tools: aiTools,
+          abortSignal: options?.signal
+        });
+        return this.processStepResult(result.text, result.toolCalls, result.usage, stepStart, options);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (!this.router.shouldFallback(err)) throw lastError;
+        this.emit("provider:fallback", { from: provider.id, error: lastError.message, step: this.state.step });
+      }
+    }
+    throw lastError ?? new Error("All providers failed");
   }
   async executeStepStreaming(options) {
     const aiTools = this.buildAITools();
     await this.runHook("onBeforeLLMCall", { agentState: this.state, step: this.state.step, messages: this.messages });
     this.emit("llm:call", { step: this.state.step, messageCount: this.messages.length });
-    const provider = this.router.getDefault();
     const stepStart = Date.now();
-    const streamResults = streamText({
-      model: provider.model,
-      system: this.systemPrompt,
-      messages: this.messages.slice(1),
-      tools: aiTools,
-      abortSignal: options?.signal
-    });
-    const consumed = await streamResults;
-    let fullText = "";
-    for await (const chunk of consumed.textStream) {
-      fullText += chunk;
-      if (options?.onText) options.onText(chunk);
+    const fallbackChain = this.router.getFallbackChain();
+    let lastError;
+    for (const provider of fallbackChain) {
+      try {
+        const streamResults = streamText({
+          model: provider.model,
+          system: this.systemPrompt,
+          messages: this.messages.slice(1),
+          tools: aiTools,
+          abortSignal: options?.signal
+        });
+        const consumed = await streamResults;
+        let fullText = "";
+        for await (const chunk of consumed.textStream) {
+          fullText += chunk;
+          if (options?.onText) options.onText(chunk);
+        }
+        const finalText = typeof consumed.text === "string" ? consumed.text : fullText;
+        const finalToolCalls = Array.isArray(consumed.toolCalls) ? consumed.toolCalls : [];
+        return this.processStepResult(
+          finalText || void 0,
+          finalToolCalls,
+          consumed.usage,
+          stepStart,
+          options
+        );
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (!this.router.shouldFallback(err)) throw lastError;
+        this.emit("provider:fallback", { from: provider.id, error: lastError.message, step: this.state.step });
+      }
     }
-    const finalText = typeof consumed.text === "string" ? consumed.text : fullText;
-    const finalToolCalls = Array.isArray(consumed.toolCalls) ? consumed.toolCalls : [];
-    return this.processStepResult(
-      finalText || void 0,
-      finalToolCalls,
-      consumed.usage,
-      stepStart,
-      options
-    );
+    throw lastError ?? new Error("All providers failed");
   }
   async processStepResult(text, toolCalls, usage, stepStart, options) {
     const stepDuration = Date.now() - stepStart;
@@ -700,6 +905,18 @@ var Agent = class {
   }
   emit(type, data) {
     const event = { type, timestamp: Date.now(), data };
+    const traceTypeMap = {
+      "step": "step",
+      "tool:call": "tool_call",
+      "tool:result": "tool_result",
+      "llm:call": "llm_call",
+      "context:compressed": "compression",
+      "skill:activated": "skill",
+      "skill:deactivated": "skill",
+      "provider:fallback": "provider_fallback"
+    };
+    const tracedType = traceTypeMap[type];
+    if (tracedType) this.tracer.record(tracedType, data);
     for (const handler of this.eventHandlers.get(type) ?? []) {
       try {
         handler(event);
@@ -728,7 +945,14 @@ var SkillLoaderWorker = class {
   async loadAll(dirs) {
     const { SkillLoader } = await import("@agentnova/skills");
     const loader = new SkillLoader();
-    this.skills = await loader.loadAll(dirs);
+    const loaded = await loader.loadAll(dirs);
+    this.skills = loaded.map((s) => ({
+      name: s.name,
+      tools: s.tools ?? [],
+      prompt: s.prompt ?? "",
+      active: s.active,
+      activateOn: s.activateOn
+    }));
   }
   activateForInput(input) {
     const active = [];
@@ -757,6 +981,9 @@ export {
   DEFAULT_CONTEXT_CONFIG,
   PROVIDER_PRICING,
   ResourceLimitError,
+  StructuredLogger,
+  TraceCollector,
+  TraceReplay,
   UsageTracker,
   createAgent,
   getPricing

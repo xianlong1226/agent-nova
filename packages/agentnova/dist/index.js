@@ -1,5 +1,10 @@
 // src/index.ts
 import { Agent, createAgent } from "@agentnova/core";
+import {
+  TraceCollector,
+  TraceReplay,
+  StructuredLogger
+} from "@agentnova/core";
 import { ToolRegistry, ToolEngine, defineTool } from "@agentnova/tools";
 import { fsTools, shellTools } from "@agentnova/tools";
 import { PermissionGuard, DEFAULT_PERMISSION_CONFIG, DEFAULT_LIMITS } from "@agentnova/permission";
@@ -49,8 +54,11 @@ export {
   ProviderRouter,
   SkillLoader,
   SkillRegistry,
+  StructuredLogger,
   ToolEngine,
   ToolRegistry,
+  TraceCollector,
+  TraceReplay,
   WorkingMemory,
   claudeHaiku35,
   claudeSonnet4,

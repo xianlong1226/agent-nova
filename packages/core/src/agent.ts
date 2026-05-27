@@ -8,6 +8,7 @@ import { ProviderRouter } from '@agentnova/providers'
 import { ContextManager, DEFAULT_CONTEXT_CONFIG } from './context.js'
 import { UsageTracker, getPricing, ResourceLimitError, type UsageSnapshot } from './usage.js'
 import { createToolContext } from './logger.js'
+import { TraceCollector, TraceReplay, StructuredLogger, type Trace, type TraceEntry } from './trace.js'
 import { WorkingMemory, ProjectMemory, MemoryInjector, LongTermMemory } from '@agentnova/memory'
 import type { LongTermMemoryConfig } from '@agentnova/memory'
 import type {
@@ -34,6 +35,8 @@ export class Agent {
   private router: ProviderRouter
   private contextMgr: ContextManager
   private usage: UsageTracker
+  private tracer: TraceCollector
+  private logger: StructuredLogger
 
   private systemPrompt: string
   private workingDir: string
@@ -82,6 +85,9 @@ export class Agent {
 
     const provider = this.router.getDefault()
     this.usage = new UsageTracker(getPricing(provider.id), this.limits)
+
+    this.tracer = new TraceCollector(provider.id)
+    this.logger = new StructuredLogger({ traceId: this.tracer['traceId'] })
 
     // Init memory
     this.workingMemory = new WorkingMemory()
@@ -237,6 +243,15 @@ export class Agent {
   getUsage(): UsageSnapshot { return this.usage.snapshot() }
   abort(): void { this.state.aborted = true }
 
+  /** Get execution trace */
+  getTrace(): Trace { return this.tracer.buildTrace(this.steps, this.usage.totalTokens, this.usage.estimatedCost) }
+
+  /** Get trace replay */
+  replayTrace(): TraceReplay { return new TraceReplay(this.getTrace()) }
+
+  /** Get structured logger */
+  getLogger(): StructuredLogger { return this.logger }
+
   /** Store a memory item */
   async remember(key: string, content: string, layer?: 'working' | 'project' | 'longterm'): Promise<void> {
     await this.memoryInjector.store(key, content, { layer })
@@ -277,51 +292,76 @@ export class Agent {
     const aiTools = this.buildAITools()
     await this.runHook('onBeforeLLMCall', { agentState: this.state, step: this.state.step, messages: this.messages })
     this.emit('llm:call', { step: this.state.step, messageCount: this.messages.length })
-    const provider = this.router.getDefault()
     const stepStart = Date.now()
 
-    const result = await generateText({
-      model: provider.model,
-      system: this.systemPrompt,
-      messages: this.messages.slice(1),
-      tools: aiTools,
-      abortSignal: options?.signal,
-    })
+    // Try providers with fallback chain
+    const fallbackChain = this.router.getFallbackChain()
+    let lastError: Error | undefined
 
-    return this.processStepResult(result.text, result.toolCalls, result.usage, stepStart, options)
+    for (const provider of fallbackChain) {
+      try {
+        const result = await generateText({
+          model: provider.model,
+          system: this.systemPrompt,
+          messages: this.messages.slice(1),
+          tools: aiTools,
+          abortSignal: options?.signal,
+        })
+        return this.processStepResult(result.text, result.toolCalls, result.usage, stepStart, options)
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err))
+        if (!this.router.shouldFallback(err)) throw lastError
+        this.emit('provider:fallback', { from: provider.id, error: lastError.message, step: this.state.step })
+      }
+    }
+
+    throw lastError ?? new Error('All providers failed')
   }
 
   private async executeStepStreaming(options?: AgentRunOptions): Promise<boolean> {
     const aiTools = this.buildAITools()
     await this.runHook('onBeforeLLMCall', { agentState: this.state, step: this.state.step, messages: this.messages })
     this.emit('llm:call', { step: this.state.step, messageCount: this.messages.length })
-    const provider = this.router.getDefault()
     const stepStart = Date.now()
 
-    const streamResults = streamText({
-      model: provider.model,
-      system: this.systemPrompt,
-      messages: this.messages.slice(1),
-      tools: aiTools,
-      abortSignal: options?.signal,
-    })
+    // Try providers with fallback chain
+    const fallbackChain = this.router.getFallbackChain()
+    let lastError: Error | undefined
 
-    const consumed = await streamResults
-    let fullText = ''
-    for await (const chunk of consumed.textStream) {
-      fullText += chunk
-      if (options?.onText) options.onText(chunk)
+    for (const provider of fallbackChain) {
+      try {
+        const streamResults = streamText({
+          model: provider.model,
+          system: this.systemPrompt,
+          messages: this.messages.slice(1),
+          tools: aiTools,
+          abortSignal: options?.signal,
+        })
+
+        const consumed = await streamResults
+        let fullText = ''
+        for await (const chunk of consumed.textStream) {
+          fullText += chunk
+          if (options?.onText) options.onText(chunk)
+        }
+
+        const finalText = typeof consumed.text === 'string' ? consumed.text : fullText
+        const finalToolCalls = Array.isArray(consumed.toolCalls) ? consumed.toolCalls : []
+        return this.processStepResult(
+          finalText || undefined,
+          finalToolCalls,
+          consumed.usage,
+          stepStart,
+          options,
+        )
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err))
+        if (!this.router.shouldFallback(err)) throw lastError
+        this.emit('provider:fallback', { from: provider.id, error: lastError.message, step: this.state.step })
+      }
     }
 
-    const finalText = typeof consumed.text === 'string' ? consumed.text : fullText
-    const finalToolCalls = Array.isArray(consumed.toolCalls) ? consumed.toolCalls : []
-    return this.processStepResult(
-      finalText || undefined,
-      finalToolCalls,
-      consumed.usage,
-      stepStart,
-      options,
-    )
+    throw lastError ?? new Error('All providers failed')
   }
 
   private async processStepResult(
@@ -479,6 +519,20 @@ export class Agent {
 
   private emit(type: AgentEventName, data: Record<string, unknown>): void {
     const event: AgentEvent = { type, timestamp: Date.now(), data }
+    // Record to trace collector
+    const traceTypeMap: Partial<Record<AgentEventName, TraceEntry['type']>> = {
+      'step': 'step',
+      'tool:call': 'tool_call',
+      'tool:result': 'tool_result',
+      'llm:call': 'llm_call',
+      'context:compressed': 'compression',
+      'skill:activated': 'skill',
+      'skill:deactivated': 'skill',
+      'provider:fallback': 'provider_fallback',
+    }
+    const tracedType = traceTypeMap[type]
+    if (tracedType) this.tracer.record(tracedType, data)
+
     for (const handler of this.eventHandlers.get(type) ?? []) {
       try { handler(event) } catch { /* swallow */ }
     }
@@ -509,7 +563,14 @@ class SkillLoaderWorker {
   async loadAll(dirs: string[]) {
     const { SkillLoader } = await import('@agentnova/skills')
     const loader = new SkillLoader()
-    this.skills = await loader.loadAll(dirs)
+    const loaded = await loader.loadAll(dirs)
+    this.skills = loaded.map(s => ({
+      name: s.name,
+      tools: s.tools ?? [],
+      prompt: s.prompt ?? '',
+      active: s.active,
+      activateOn: s.activateOn,
+    }))
   }
 
   activateForInput(input: string): Array<{ name: string; active: boolean }> {

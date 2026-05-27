@@ -19,6 +19,19 @@ export type {
   CompressionStrategy,
 } from '@agentnova/core'
 
+// Trace & Logging (Phase 4)
+export {
+  TraceCollector,
+  TraceReplay,
+  StructuredLogger,
+} from '@agentnova/core'
+export type {
+  Trace,
+  TraceEntry,
+  LogEntry,
+  LogLevel,
+} from '@agentnova/core'
+
 // Tools
 export { ToolRegistry, ToolEngine, defineTool } from '@agentnova/tools'
 export { fsTools, shellTools } from '@agentnova/tools'

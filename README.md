@@ -1,14 +1,6 @@
-# AgentNova ✨
+# AgentNova SDK
 
-> 借鉴 Claude Code 核心设计，基于 Vercel AI SDK 构建的通用 Agent 开发框架
-
-## 特性
-
-- 🔧 **Tool-First** — 工具是 Agent 的手脚，一切能力通过工具暴露
-- 🛡️ **Safe-by-Default** — 危险操作默认拦截，显式授权才放行
-- 🧠 **Context-Aware** — 智能上下文管理，不浪费一个 token
-- 🧩 **Skill-Driven** — 能力模块化，按需加载，即插即用
-- 🔄 **Multi-Provider** — 多 LLM 适配，自动降级
+🔮 极简 AI Agent 开发框架，TypeScript 原生支持。
 
 ## 快速开始
 
@@ -22,101 +14,190 @@ pnpm install
 pnpm dev "帮我看看当前目录有什么文件"
 ```
 
-## 编程使用
+## 手动使用
 
 ```typescript
-import { createAgent } from '@agentnova/core'
-import { fsTools, shellTools } from '@agentnova/tools'
-import { createRouter, deepseekChat } from '@agentnova/providers'
+import {
+  createAgent,
+  createRouter,
+  deepseekChat,
+  fsTools,
+  shellTools,
+} from 'agentnova'
 
 const agent = createAgent({
-  systemPrompt: '你是一个智能助手，帮助用户完成任务。',
+  systemPrompt: '你是一个智能助手，用中文回复。',
   workingDir: process.cwd(),
   router: createRouter([deepseekChat()], 'deepseek-chat'),
   tools: [...fsTools, ...shellTools],
+})
+
+// 非流式
+const result = await agent.run('帮我创建一个新的 TypeScript 文件')
+
+// 流式
+const streamResult = await agent.runStream('分析项目结构', {
+  onText: (chunk) => process.stdout.write(chunk),
+  onStep: (step) => console.log(`Step ${step.step}`),
+})
+
+console.log('耗时:', result.totalDurationMs, 'ms')
+console.log('Token:', result.usage.totalTokens)
+console.log('费用:', `$${result.usage.estimatedCost.toFixed(4)}`)
+```
+
+## 多 Provider 降级
+
+```typescript
+import { createRouter, deepseekChat, openaiGPT4o, claudeHaiku35 } from 'agentnova'
+
+const router = createRouter(
+  [deepseekChat(), openaiGPT4o(), claudeHaiku35()],
+  'deepseek-chat'
+)
+
+// Agent 会自动降级：deepseek 失败 → openai → claude
+const agent = createAgent({
+  systemPrompt: '...',
+  workingDir: '.',
+  router,
+  tools: [...fsTools],
+})
+```
+
+## 权限控制
+
+```typescript
+const agent = createAgent({
+  // ...
   permissions: {
     mode: 'ask',
-    onApprovalNeeded: async (req) => {
-      // 接入你的审批 UI
-      return 'allow-once'
+    rules: [
+      { tool: 'fs.writeFile', level: 'ask', scope: ['src/**'] },
+      { tool: 'shell.exec', level: 'dangerous', scope: ['npm test'] },
+    ],
+    sandbox: {
+      enabled: true,
+      allowedDirs: ['/project/src'],
+      blockedCommands: ['rm -rf /', 'curl | sh'],
+      maxFileSize: 1024 * 1024, // 1MB
+    },
+  },
+})
+```
+
+## 记忆系统
+
+```typescript
+// 三层记忆架构
+const agent = createAgent({
+  // ...
+  longTermMemory: {
+    dbPath: './data/memory.db',
+    embeddingFn: async (text: string) => {
+      // 接入你的 embedding 服务
+      return [0.1, 0.2, ...]
     },
   },
 })
 
-const result = await agent.run('读取 package.json 并分析依赖')
+// 存储
+await agent.remember('user_preference', '喜欢简洁的代码风格', 'project')
+await agent.remember('bug_fix', 'React useEffect 依赖数组不能漏', 'longterm')
 
-console.log(result.text)
-console.log(`Steps: ${result.steps.length}, Tokens: ${result.state.totalTokensUsed}`)
-```
-
-## 自定义工具
-
-```typescript
-import { defineTool } from '@agentnova/tools'
-import { z } from 'zod'
-
-const myTool = defineTool({
-  name: 'my.search',
-  description: '搜索内部知识库',
-  parameters: z.object({
-    query: z.string().describe('搜索关键词'),
-    limit: z.number().default(10),
-  }),
-  permission: { level: 'read', description: '搜索知识库' },
-  execute: async ({ query, limit }, ctx) => {
-    const results = await searchKnowledgeBase(query, limit)
-    return results
-  },
-})
-
-agent.registerTool(myTool)
+// 记忆会自动注入上下文——每轮对话前 Agent 自动检索最相关的记忆
 ```
 
 ## 技能系统
 
 ```typescript
-import { SkillLoader, defineSkill } from '@agentnova/skills'
+// 安装技能
+// npx agentnova skill install https://github.com/example/code-review-skill
 
-const loader = new SkillLoader()
-
-// 从目录加载
-await loader.loadFromDir('./skills/code-review')
-
-// 按需激活
-const active = await loader.activateForInput('帮我 review 这段代码')
-
-// 获取激活技能的工具和提示词
-const tools = loader.getActiveTools()
-const prompts = loader.getActivePrompts()
+// 项目内定义技能（skills/my-skill/skill.config.json）
+{
+  "name": "code-review",
+  "version": "1.0.0",
+  "description": "代码审查技能",
+  "activateOn": "input.includes('review') || input.includes('审查')",
+  "prompt": "你是一个代码审查专家...",
+  "tools": [...],
+  "knowledge": ["review-guidelines.md"]
+}
 ```
 
-## 架构
+## 执行追踪 & 日志
+
+```typescript
+const agent = createAgent({ ... })
+
+const result = await agent.run('做点事情')
+
+// 获取执行轨迹
+const trace = agent.getTrace()
+console.log(trace.steps.length, '步')
+console.log(trace.totalTokens, 'tokens')
+
+// 回放
+const replay = agent.replayTrace()
+console.log(replay.summary())
+
+// 结构化日志
+const logger = agent.getLogger()
+logger.info('custom event', { detail: '...' })
+console.log(logger.exportNDJSON())
+```
+
+## 钩子系统
+
+```typescript
+const agent = createAgent({ ... })
+
+// 在 LLM 调用前修改消息
+agent.hook('onBeforeLLMCall', async (ctx) => {
+  console.log(`即将调用 LLM，步骤 ${ctx.step}`)
+})
+
+// 在工具调用后记录日志
+agent.hook('onAfterToolCall', async (ctx) => {
+  console.log(`工具 ${ctx.toolCall.tool} 完成`)
+  if (ctx.toolResult.error) {
+    console.error(`工具出错: ${ctx.toolResult.error}`)
+  }
+})
+
+// 阻止危险操作
+agent.hook('onBeforeToolCall', async (ctx) => {
+  if (ctx.toolCall.tool === 'shell.exec' && ctx.toolCall.args.cmd?.includes('rm')) {
+    return { action: 'deny', reason: '不允许删除文件' }
+  }
+})
+```
+
+## 事件监听
+
+```typescript
+const agent = createAgent({ ... })
+
+agent.on('step', (event) => console.log(`Step ${event.data.step}`))
+agent.on('tool:call', (event) => console.log(`🔧 ${event.data.tool}`))
+agent.on('tool:result', (event) => console.log(`✅ ${event.data.tool}`))
+agent.on('llm:call', (event) => console.log('🤖 LLM 调用'))
+agent.on('context:compressed', () => console.log('🗜️ 上下文已压缩'))
+agent.on('provider:fallback', (event) => console.log(`🔄 降级: ${event.data.from}`))
+agent.on('agent:end', (event) => console.log(`✅ 完成，${event.data.steps} 步`))
+```
+
+## 包架构
 
 ```
-AgentNova SDK
-├── @agentnova/core       — Agent 类 + ReAct 循环 + 状态 + 上下文
-├── @agentnova/tools      — 工具定义 + 注册 + 执行 + 内置工具
-├── @agentnova/permission — 权限守卫 + 审批 + 沙箱 + 资源限制
-├── @agentnova/memory     — 三层记忆 (短期/项目/长期) + 语义检索
-├── @agentnova/skills     — 技能加载 + 隔离 + 市场
-├── @agentnova/providers  — 多 Provider 路由 + 降级
-└── agentnova             — 统一入口 + CLI
-```
-
-## 开发
-
-```bash
-# 安装依赖
-pnpm install
-
-# 构建
-pnpm build
-
-# 测试
-pnpm test
-
-# 单包开发
-cd packages/core && pnpm dev
+@agentnova/core        — Agent 核心、上下文管理、Usage 追踪、Trace 记录
+@agentnova/tools       — 工具注册表、工具引擎、内置 fs/shell 工具
+@agentnova/permission  — 权限守卫、沙箱、命令黑名单
+@agentnova/providers   — Provider 路由、降级链、多模型支持
+@agentnova/memory      — 三层记忆系统（Working/Project/LongTerm）
+@agentnova/skills      — 技能加载器、技能市场
+agentnova              — 统一入口 + CLI
 ```
 
 ## License

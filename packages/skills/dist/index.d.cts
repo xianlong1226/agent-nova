@@ -1,19 +1,13 @@
-import { ToolDefinition } from '@agentnova/tools';
 import { z } from 'zod';
-
-/**
- * Skill System — Load, isolate, and activate skills on demand
- *
- * Skill = Tools + Prompt + Knowledge + Config
- */
+import { ToolDefinition } from '@agentnova/tools';
 
 interface SkillConfig {
     name: string;
     version: string;
     description: string;
-    tools: ToolDefinition[];
-    prompt: string;
-    knowledge: string[];
+    tools?: ToolDefinition[];
+    prompt?: string;
+    knowledge?: string[];
     activateOn?: (input: string) => boolean;
     configSchema?: z.ZodType;
     defaultConfig?: Record<string, unknown>;
@@ -23,31 +17,30 @@ interface Skill extends SkillConfig {
     active: boolean;
     resolvedConfig: Record<string, unknown>;
 }
-declare class SkillLoader {
-    private skills;
-    /** Load a skill from a directory */
-    loadFromDir(dir: string): Promise<Skill>;
-    /** Load multiple skills from directories */
-    loadAll(dirs: string[]): Promise<Skill[]>;
-    /** Activate skills relevant to the current input */
-    activateForInput(input: string): Promise<Skill[]>;
-    /** Explicitly activate a skill by name */
-    activate(name: string): Skill | undefined;
-    /** Deactivate a skill by name */
-    deactivate(name: string): Skill | undefined;
-    /** Get all active skills */
-    getActive(): Skill[];
-    /** Get tools from all active skills */
-    getActiveTools(): ToolDefinition[];
-    /** Get prompt fragments from all active skills */
-    getActivePrompts(): string[];
-    /** Get knowledge from all active skills */
-    getActiveKnowledge(): string[];
-    /** Get a skill by name */
-    get(name: string): Skill | undefined;
-    /** List all skill names */
-    list(): string[];
+interface SkillManifest$1 {
+    name: string;
+    version: string;
+    description: string;
+    author?: string;
+    source: string;
+    dependencies?: Record<string, string>;
+    tags?: string[];
 }
+
+declare class SkillLoader {
+    /**
+     * Load all skills from the given directories.
+     * Each skill directory should contain a skill.config.json or skill.config.ts file.
+     */
+    loadAll(dirs: string[]): Promise<Skill[]>;
+    /** Load a single skill from a directory */
+    loadOne(dir: string): Promise<Skill | null>;
+}
+declare function defineSkill(config: SkillConfig): SkillConfig;
+
+/**
+ * Skill Market — Team sharing via Git repos or npm packages
+ */
 interface SkillManifest {
     name: string;
     version: string;
@@ -55,18 +48,37 @@ interface SkillManifest {
     author?: string;
     source: string;
     dependencies?: Record<string, string>;
+    tags?: string[];
+}
+interface SkillRegistryConfig {
+    /** Directory for installed skills */
+    skillsDir: string;
+    /** Registry file path (stores manifest index) */
+    registryFile?: string;
 }
 declare class SkillRegistry {
     private manifests;
+    private skillsDir;
+    private registryFile;
+    constructor(config: SkillRegistryConfig);
+    /** Load registry from disk */
+    load(): Promise<void>;
+    /** Save registry to disk */
+    save(): Promise<void>;
     /** Register a skill manifest */
     register(manifest: SkillManifest): void;
-    /** Search available skills */
+    /** Search available skills by name, description, or tags */
     search(query: string): SkillManifest[];
     /** Get manifest by name */
     get(name: string): SkillManifest | undefined;
     /** List all available skills */
     list(): SkillManifest[];
+    /** Install a skill from git repo */
+    install(source: string, options?: {
+        name?: string;
+    }): Promise<SkillManifest>;
+    /** Uninstall a skill by name */
+    uninstall(name: string): Promise<boolean>;
 }
-declare function defineSkill(config: SkillConfig): SkillConfig;
 
-export { type Skill, type SkillConfig, SkillLoader, type SkillManifest, SkillRegistry, defineSkill };
+export { type Skill, type SkillConfig, SkillLoader, type SkillManifest$1 as SkillManifest, SkillRegistry, defineSkill };

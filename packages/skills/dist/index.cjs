@@ -25,132 +25,130 @@ __export(index_exports, {
   defineSkill: () => defineSkill
 });
 module.exports = __toCommonJS(index_exports);
+
+// src/loader.ts
 var import_promises = require("fs/promises");
 var import_path = require("path");
 var import_fs = require("fs");
 var SkillLoader = class {
-  skills = /* @__PURE__ */ new Map();
-  /** Load a skill from a directory */
-  async loadFromDir(dir) {
-    const resolvedDir = (0, import_path.resolve)(dir);
-    const skillMdPath = (0, import_path.join)(resolvedDir, "SKILL.md");
-    let prompt = "";
-    if ((0, import_fs.existsSync)(skillMdPath)) {
-      prompt = await (0, import_promises.readFile)(skillMdPath, "utf-8");
-    }
-    let config = {};
-    const configPath = (0, import_path.join)(resolvedDir, "skill.config.ts");
-    if ((0, import_fs.existsSync)(configPath)) {
-      try {
-        const mod = await import(configPath);
-        if (mod.default) config = mod.default;
-      } catch {
-      }
-    }
-    const knowledge = [];
-    const knowledgeDir = (0, import_path.join)(resolvedDir, "knowledge");
-    if ((0, import_fs.existsSync)(knowledgeDir)) {
-      const files = await (0, import_promises.readdir)(knowledgeDir);
-      for (const file of files) {
-        if (file.endsWith(".md") || file.endsWith(".txt")) {
-          const content = await (0, import_promises.readFile)((0, import_path.join)(knowledgeDir, file), "utf-8");
-          knowledge.push(content);
-        }
-      }
-    }
-    const skill = {
-      name: config.name ?? dir.split("/").pop() ?? "unknown",
-      version: config.version ?? "0.0.1",
-      description: config.description ?? "",
-      tools: config.tools ?? [],
-      prompt,
-      knowledge,
-      activateOn: config.activateOn,
-      configSchema: config.configSchema,
-      defaultConfig: config.defaultConfig ?? {},
-      dir: resolvedDir,
-      active: false,
-      resolvedConfig: {}
-    };
-    this.skills.set(skill.name, skill);
-    return skill;
-  }
-  /** Load multiple skills from directories */
+  /**
+   * Load all skills from the given directories.
+   * Each skill directory should contain a skill.config.json or skill.config.ts file.
+   */
   async loadAll(dirs) {
     const skills = [];
     for (const dir of dirs) {
-      try {
-        const skill = await this.loadFromDir(dir);
-        skills.push(skill);
-      } catch (err) {
-        console.warn(`Failed to load skill from ${dir}:`, err);
+      if (!(0, import_fs.existsSync)(dir)) continue;
+      const entries = await (0, import_promises.readdir)(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const skillDir = (0, import_path.join)(dir, entry.name);
+        try {
+          const skill = await this.loadOne(skillDir);
+          if (skill) skills.push(skill);
+        } catch (err) {
+          console.warn(`[SkillLoader] Failed to load skill from ${skillDir}: ${err}`);
+        }
       }
     }
     return skills;
   }
-  /** Activate skills relevant to the current input */
-  async activateForInput(input) {
-    const activated = [];
-    for (const skill of this.skills.values()) {
-      if (skill.activateOn) {
-        if (skill.activateOn(input)) {
-          skill.active = true;
-          activated.push(skill);
-        }
-      } else {
+  /** Load a single skill from a directory */
+  async loadOne(dir) {
+    const configPath = (0, import_path.join)(dir, "skill.config.json");
+    if (!(0, import_fs.existsSync)(configPath)) return null;
+    const raw = await (0, import_promises.readFile)(configPath, "utf-8");
+    const config = JSON.parse(raw);
+    let prompt = config.prompt;
+    if (prompt && !prompt.includes("\n")) {
+      const promptPath = (0, import_path.resolve)(dir, prompt);
+      if ((0, import_fs.existsSync)(promptPath)) {
+        prompt = await (0, import_promises.readFile)(promptPath, "utf-8");
       }
     }
-    return activated;
-  }
-  /** Explicitly activate a skill by name */
-  activate(name) {
-    const skill = this.skills.get(name);
-    if (skill) skill.active = true;
-    return skill;
-  }
-  /** Deactivate a skill by name */
-  deactivate(name) {
-    const skill = this.skills.get(name);
-    if (skill) skill.active = false;
-    return skill;
-  }
-  /** Get all active skills */
-  getActive() {
-    return Array.from(this.skills.values()).filter((s) => s.active);
-  }
-  /** Get tools from all active skills */
-  getActiveTools() {
-    return this.getActive().flatMap((s) => s.tools);
-  }
-  /** Get prompt fragments from all active skills */
-  getActivePrompts() {
-    return this.getActive().filter((s) => s.prompt).map((s) => s.prompt);
-  }
-  /** Get knowledge from all active skills */
-  getActiveKnowledge() {
-    return this.getActive().flatMap((s) => s.knowledge);
-  }
-  /** Get a skill by name */
-  get(name) {
-    return this.skills.get(name);
-  }
-  /** List all skill names */
-  list() {
-    return Array.from(this.skills.keys());
+    let knowledge = [];
+    if (config.knowledge?.length) {
+      knowledge = await Promise.all(
+        config.knowledge.map(async (kRef) => {
+          const kPath = (0, import_path.resolve)(dir, kRef);
+          if ((0, import_fs.existsSync)(kPath)) {
+            return await (0, import_promises.readFile)(kPath, "utf-8");
+          }
+          return kRef;
+        })
+      );
+    }
+    let tools = config.tools ?? [];
+    const toolsPath = (0, import_path.join)(dir, "tools.json");
+    if ((0, import_fs.existsSync)(toolsPath)) {
+      try {
+        const toolsData = JSON.parse(await (0, import_promises.readFile)(toolsPath, "utf-8"));
+        if (Array.isArray(toolsData)) {
+          tools = [...tools, ...toolsData];
+        }
+      } catch {
+      }
+    }
+    let fullPrompt = prompt ?? "";
+    if (knowledge.length > 0) {
+      fullPrompt += "\n\n## Knowledge\n\n" + knowledge.map((k, i) => `### Source ${i + 1}
+${k}`).join("\n\n");
+    }
+    return {
+      ...config,
+      dir,
+      tools,
+      prompt: fullPrompt || void 0,
+      active: false,
+      resolvedConfig: config.defaultConfig ?? {}
+    };
   }
 };
+function defineSkill(config) {
+  return config;
+}
+
+// src/market.ts
+var import_promises2 = require("fs/promises");
+var import_fs2 = require("fs");
+var import_path2 = require("path");
+var import_child_process = require("child_process");
 var SkillRegistry = class {
   manifests = /* @__PURE__ */ new Map();
+  skillsDir;
+  registryFile;
+  constructor(config) {
+    this.skillsDir = config.skillsDir;
+    this.registryFile = config.registryFile ?? (0, import_path2.join)(config.skillsDir, "registry.json");
+  }
+  /** Load registry from disk */
+  async load() {
+    if (!(0, import_fs2.existsSync)(this.registryFile)) return;
+    const data = await (0, import_promises2.readFile)(this.registryFile, "utf-8");
+    const arr = JSON.parse(data);
+    for (const m of arr) {
+      this.manifests.set(m.name, m);
+    }
+  }
+  /** Save registry to disk */
+  async save() {
+    if (!(0, import_fs2.existsSync)(this.skillsDir)) await (0, import_promises2.mkdir)(this.skillsDir, { recursive: true });
+    const arr = Array.from(this.manifests.values());
+    await (0, import_promises2.writeFile)(this.registryFile, JSON.stringify(arr, null, 2), "utf-8");
+  }
   /** Register a skill manifest */
   register(manifest) {
     this.manifests.set(manifest.name, manifest);
   }
-  /** Search available skills */
+  /** Search available skills by name, description, or tags */
   search(query) {
     const q = query.toLowerCase();
-    return Array.from(this.manifests.values()).filter(
-      (m) => m.name.toLowerCase().includes(q) || m.description.toLowerCase().includes(q)
-    );
+    const qChars = [...q];
+    return Array.from(this.manifests.values()).filter((m) => {
+      const text = `${m.name} ${m.description} ${(m.tags ?? []).join(" ")}`.toLowerCase();
+      if (text.includes(q)) return true;
+      return qChars.some((c) => text.includes(c));
+    });
   }
   /** Get manifest by name */
   get(name) {
@@ -160,10 +158,58 @@ var SkillRegistry = class {
   list() {
     return Array.from(this.manifests.values());
   }
+  /** Install a skill from git repo */
+  async install(source, options) {
+    const skillName = options?.name ?? source.split("/").pop()?.replace(".git", "") ?? "unknown";
+    const targetDir = (0, import_path2.join)(this.skillsDir, skillName);
+    if ((0, import_fs2.existsSync)(targetDir)) {
+      throw new Error(`Skill "${skillName}" already installed at ${targetDir}`);
+    }
+    await new Promise((resolve2, reject) => {
+      const cmd = source.startsWith("http") || source.endsWith(".git") ? `git clone --depth 1 ${source} ${targetDir}` : `npm pack ${source} --pack-destination ${this.skillsDir} && cd ${this.skillsDir} && tar xf *.tgz && rm *.tgz`;
+      (0, import_child_process.exec)(cmd, (err) => {
+        if (err) reject(new Error(`Install failed: ${err.message}`));
+        else resolve2();
+      });
+    });
+    const manifest = {
+      name: skillName,
+      version: "1.0.0",
+      description: `Installed from ${source}`,
+      source
+    };
+    const configPath = (0, import_path2.join)(targetDir, "skill.config.json");
+    if ((0, import_fs2.existsSync)(configPath)) {
+      try {
+        const configData = JSON.parse(await (0, import_promises2.readFile)(configPath, "utf-8"));
+        manifest.version = configData.version ?? manifest.version;
+        manifest.description = configData.description ?? manifest.description;
+        manifest.author = configData.author;
+        manifest.tags = configData.tags;
+      } catch {
+      }
+    }
+    this.register(manifest);
+    await this.save();
+    return manifest;
+  }
+  /** Uninstall a skill by name */
+  async uninstall(name) {
+    if (!this.manifests.has(name)) return false;
+    this.manifests.delete(name);
+    await this.save();
+    const skillDir = (0, import_path2.join)(this.skillsDir, name);
+    if ((0, import_fs2.existsSync)(skillDir)) {
+      await new Promise((resolve2, reject) => {
+        (0, import_child_process.exec)(`rm -rf ${skillDir}`, (err) => {
+          if (err) reject(err);
+          else resolve2();
+        });
+      });
+    }
+    return true;
+  }
 };
-function defineSkill(config) {
-  return config;
-}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   SkillLoader,
