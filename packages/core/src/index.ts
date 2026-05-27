@@ -4,6 +4,10 @@ export { Agent, createAgent } from './agent.js'
 // ─── Context ───────────────────────────────────────────────────────
 export { ContextManager, DEFAULT_CONTEXT_CONFIG } from './context.js'
 
+// ─── Usage ─────────────────────────────────────────────────────────
+export { UsageTracker, ResourceLimitError, getPricing, PROVIDER_PRICING } from './usage.js'
+export type { TokenPrice, UsageSnapshot } from './usage.js'
+
 // ─── Types ─────────────────────────────────────────────────────────
 export type {
   AgentConfig,

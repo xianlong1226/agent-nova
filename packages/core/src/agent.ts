@@ -1,11 +1,12 @@
-import { generateText, type CoreMessage, type Tool } from 'ai'
+import { generateText, streamText, type CoreMessage, type Tool } from 'ai'
 import { z } from 'zod'
 import { ToolRegistry, ToolEngine } from '@agentnova/tools'
 import type { ToolDefinition, ToolCall, ToolResult, ToolContext } from '@agentnova/tools'
 import { PermissionGuard, DEFAULT_PERMISSION_CONFIG, DEFAULT_LIMITS } from '@agentnova/permission'
-import type { PermissionConfig, ResourceLimits, ApprovalRequest, ApprovalResult } from '@agentnova/permission'
+import type { PermissionConfig, ResourceLimits, ApprovalRequest } from '@agentnova/permission'
 import { ProviderRouter } from '@agentnova/providers'
 import { ContextManager, DEFAULT_CONTEXT_CONFIG } from './context.js'
+import { UsageTracker, getPricing, ResourceLimitError, type UsageSnapshot } from './usage.js'
 import { createToolContext } from './logger.js'
 import type {
   AgentConfig,
@@ -30,6 +31,7 @@ export class Agent {
   private guard: PermissionGuard
   private router: ProviderRouter
   private contextMgr: ContextManager
+  private usage: UsageTracker
 
   private systemPrompt: string
   private workingDir: string
@@ -48,12 +50,10 @@ export class Agent {
     this.systemPrompt = config.systemPrompt
     this.workingDir = config.workingDir
 
-    // Tools
     this.registry = new ToolRegistry()
     this.registry.registerAll(config.tools)
     this.engine = new ToolEngine(this.registry)
 
-    // Permissions
     this.permissions = {
       ...DEFAULT_PERMISSION_CONFIG,
       ...config.permissions,
@@ -61,18 +61,22 @@ export class Agent {
     }
     this.guard = new PermissionGuard(this.permissions)
 
-    // Provider
     this.router = config.router
 
-    // Context
     this.contextConfig = { ...DEFAULT_CONTEXT_CONFIG, ...config.context }
     this.contextMgr = new ContextManager(this.contextConfig, this.router)
 
-    // Limits
     this.limits = { ...DEFAULT_LIMITS, ...this.permissions.limits }
 
-    // Init state
-    this.state = {
+    const provider = this.router.getDefault()
+    this.usage = new UsageTracker(getPricing(provider.id), this.limits)
+
+    this.state = this.createInitialState()
+    this.messages = [{ role: 'system', content: this.systemPrompt }]
+  }
+
+  private createInitialState(): AgentState {
+    return {
       step: 0,
       totalTokensUsed: 0,
       totalCost: 0,
@@ -81,230 +85,38 @@ export class Agent {
       aborted: false,
       messages: [],
     }
-
-    this.messages = [{ role: 'system', content: this.systemPrompt }]
   }
 
   // ─── Public API ──────────────────────────────────────────────────
 
+  /** Run the agent with a user prompt (non-streaming) */
   async run(prompt: string, options?: AgentRunOptions): Promise<AgentResult> {
-    // Reset state
-    this.state = {
-      step: 0,
-      totalTokensUsed: 0,
-      totalCost: 0,
-      startTime: Date.now(),
-      toolCallCount: 0,
-      aborted: false,
-      messages: [{ role: 'system', content: this.systemPrompt }],
-    }
-    this.steps = []
+    this.resetState()
     this.messages.push({ role: 'user', content: prompt })
-
     this.emit('agent:start', { prompt })
     await this.runHook('onStart', { agentState: this.state, step: 0 })
 
-    const maxSteps = options?.maxSteps ?? this.limits.maxSteps
     const signal = options?.signal
-    const runStart = Date.now()
+    const maxSteps = options?.maxSteps ?? this.limits.maxSteps
 
     try {
       while (this.state.step < maxSteps) {
-        if (signal?.aborted || this.state.aborted) {
-          this.state.aborted = true
-          break
-        }
-
-        // Check limits
-        if (this.state.totalTokensUsed >= this.limits.maxTokens) break
-        if (this.state.toolCallCount >= this.limits.maxToolCalls) break
-        if (Date.now() - this.state.startTime >= this.limits.timeoutMs) break
-
-        // Context compression
+        if (signal?.aborted || this.state.aborted) { this.state.aborted = true; break }
+        const limitCheck = this.usage.isLimitExceeded()
+        if (limitCheck.exceeded) { this.emit('agent:error', { error: limitCheck.reason, step: this.state.step }); break }
         if (this.contextMgr.needsCompression(this.messages)) {
           this.messages = await this.contextMgr.compress(this.messages)
           this.emit('context:compressed', { step: this.state.step })
         }
-
-        // Build AI SDK tools
-        const aiTools = this.buildAITools()
-
-        // Hook: onBeforeLLMCall
-        await this.runHook('onBeforeLLMCall', {
-          agentState: this.state,
-          step: this.state.step,
-          messages: this.messages,
-        })
-
-        // Call LLM
-        this.emit('llm:call', { step: this.state.step, messageCount: this.messages.length })
-        const provider = this.router.getDefault()
-
-        const stepStart = Date.now()
-        const result = await generateText({
-          model: provider.model,
-          system: this.systemPrompt,
-          messages: this.messages.slice(1),
-          tools: aiTools,
-          abortSignal: signal,
-        })
-
-        const stepDuration = Date.now() - stepStart
-
-        if (result.usage) {
-          this.state.totalTokensUsed += result.usage.totalTokens ?? 0
-        }
-
-        await this.runHook('onAfterLLMCall', {
-          agentState: this.state,
-          step: this.state.step,
-          messages: this.messages,
-        })
-
-        this.emit('llm:response', { step: this.state.step, tokensUsed: result.usage?.totalTokens })
-
-        const stepInfo: StepInfo = {
-          step: this.state.step,
-          text: result.text || undefined,
-          durationMs: stepDuration,
-        }
-
-        if (result.text && options?.onText) {
-          options.onText(result.text)
-        }
-
-        // Handle tool calls
-        if (result.toolCalls && result.toolCalls.length > 0) {
-          const toolResults: ToolResult[] = []
-
-          stepInfo.toolCalls = result.toolCalls.map(tc => ({
-            tool: tc.toolName,
-            args: tc.args as Record<string, unknown>,
-          }))
-
-          for (const toolCall of result.toolCalls) {
-            const call: ToolCall = {
-              tool: toolCall.toolName,
-              args: toolCall.args as Record<string, unknown>,
-            }
-
-            // Permission check
-            const toolDef = this.registry.get(toolCall.toolName)
-            const approvalRequest: ApprovalRequest = {
-              tool: toolCall.toolName,
-              args: call.args,
-              permission: toolDef?.permission ?? { level: 'dangerous' as const },
-            }
-
-            const approval = await this.guard.check(approvalRequest)
-
-            if (approval === 'deny') {
-              this.emit('tool:denied', { tool: toolCall.toolName, args: call.args })
-              toolResults.push({
-                tool: toolCall.toolName,
-                output: null,
-                error: `Permission denied for tool "${toolCall.toolName}"`,
-                durationMs: 0,
-                approved: false,
-              })
-              continue
-            }
-
-            this.emit('tool:approved', { tool: toolCall.toolName, args: call.args, approval })
-
-            // Hook: onBeforeToolCall
-            const preHookCtx: HookContext = {
-              agentState: this.state,
-              step: this.state.step,
-              toolCall: call,
-            }
-            const preHookResult = await this.runHook('onBeforeToolCall', preHookCtx)
-            if (preHookResult?.action === 'deny') {
-              toolResults.push({
-                tool: toolCall.toolName,
-                output: null,
-                error: preHookResult.reason ?? 'Blocked by hook',
-                durationMs: 0,
-                approved: false,
-              })
-              continue
-            }
-
-            // Execute tool
-            this.emit('tool:call', { tool: toolCall.toolName, args: call.args })
-            this.state.toolCallCount++
-
-            const toolCtx = createToolContext(
-              this.getSnapshot(),
-              this.workingDir,
-              signal ?? new AbortController().signal,
-              (req: ApprovalRequest) => this.guard.check(req),
-            )
-
-            const toolResult = await this.engine.execute(call, toolCtx)
-
-            if (toolResult.output) {
-              toolResult.output = this.contextMgr.truncateToolOutput(toolResult.output)
-            }
-
-            toolResults.push(toolResult)
-            this.emit('tool:result', { tool: toolCall.toolName, result: toolResult })
-
-            await this.runHook('onAfterToolCall', {
-              agentState: this.state,
-              step: this.state.step,
-              toolCall: call,
-              toolResult,
-            })
-          }
-
-          stepInfo.toolResults = toolResults
-
-          // Add assistant + tool messages to history
-          this.messages.push({ role: 'assistant', content: result.text ?? '' })
-
-          for (const tr of toolResults) {
-            // Use user message as a workaround for tool result injection
-            this.messages.push({
-              role: 'user',
-              content: `[Tool: ${tr.tool}] ${tr.error ? `Error: ${tr.error}` : JSON.stringify(tr.output)}`,
-            } as CoreMessage)
-          }
-        } else {
-          if (result.text) {
-            this.messages.push({ role: 'assistant', content: result.text })
-          }
-        }
-
-        this.steps.push(stepInfo)
-        this.state.step++
-
-        if (options?.onStep) {
-          options.onStep(stepInfo)
-        }
-
-        this.emit('step', { step: this.state.step })
-
-        // No tool calls + text = agent is done
-        if (!result.toolCalls?.length && result.text) {
-          break
-        }
+        const shouldContinue = await this.executeStep(options)
+        if (!shouldContinue) break
       }
-
-      const finalText = this.extractFinalText()
-      const agentResult: AgentResult = {
-        text: finalText,
-        messages: this.messages,
-        state: { ...this.state, messages: this.messages },
-        steps: this.steps,
-        totalDurationMs: Date.now() - runStart,
-      }
-
-      await this.runHook('onEnd', { agentState: this.state, step: this.state.step })
-      this.emit('agent:end', { steps: this.state.step, durationMs: agentResult.totalDurationMs })
-
-      return agentResult
+      return this.buildResult()
     } catch (err) {
+      if (err instanceof ResourceLimitError) {
+        this.emit('agent:error', { error: err.message, step: this.state.step })
+        return this.buildResult()
+      }
       const error = err instanceof Error ? err : new Error(String(err))
       this.emit('agent:error', { error: error.message, step: this.state.step })
       await this.runHook('onError', { agentState: this.state, step: this.state.step })
@@ -312,9 +124,35 @@ export class Agent {
     }
   }
 
-  registerTool(tool: ToolDefinition): void {
-    this.registry.register(tool)
+  /** Run the agent with streaming output */
+  async runStream(prompt: string, options?: AgentRunOptions): Promise<AgentResult> {
+    this.resetState()
+    this.messages.push({ role: 'user', content: prompt })
+    this.emit('agent:start', { prompt })
+
+    const signal = options?.signal
+    const maxSteps = options?.maxSteps ?? this.limits.maxSteps
+
+    try {
+      while (this.state.step < maxSteps) {
+        if (signal?.aborted || this.state.aborted) { this.state.aborted = true; break }
+        const limitCheck = this.usage.isLimitExceeded()
+        if (limitCheck.exceeded) { this.emit('agent:error', { error: limitCheck.reason, step: this.state.step }); break }
+        if (this.contextMgr.needsCompression(this.messages)) {
+          this.messages = await this.contextMgr.compress(this.messages)
+          this.emit('context:compressed', { step: this.state.step })
+        }
+        const shouldContinue = await this.executeStepStreaming(options)
+        if (!shouldContinue) break
+      }
+      return this.buildResult()
+    } catch (err) {
+      if (err instanceof ResourceLimitError) { return this.buildResult() }
+      throw err
+    }
   }
+
+  registerTool(tool: ToolDefinition): void { this.registry.register(tool) }
 
   hook(name: HookName, fn: HookFn): void {
     if (!this.hooks.has(name)) this.hooks.set(name, [])
@@ -326,11 +164,186 @@ export class Agent {
     this.eventHandlers.get(event)!.push(handler)
   }
 
-  getState(): Readonly<AgentState> {
-    return { ...this.state }
+  getState(): Readonly<AgentState> { return { ...this.state } }
+
+  getUsage(): UsageSnapshot { return this.usage.snapshot() }
+
+  abort(): void { this.state.aborted = true }
+
+  // ─── Step Execution ──────────────────────────────────────────────
+
+  private async executeStep(options?: AgentRunOptions): Promise<boolean> {
+    const aiTools = this.buildAITools()
+    await this.runHook('onBeforeLLMCall', { agentState: this.state, step: this.state.step, messages: this.messages })
+    this.emit('llm:call', { step: this.state.step, messageCount: this.messages.length })
+    const provider = this.router.getDefault()
+    const stepStart = Date.now()
+
+    const result = await generateText({
+      model: provider.model,
+      system: this.systemPrompt,
+      messages: this.messages.slice(1),
+      tools: aiTools,
+      abortSignal: options?.signal,
+    })
+
+    return this.processStepResult(result.text, result.toolCalls, result.usage, stepStart, options)
   }
 
-  // ─── Private ─────────────────────────────────────────────────────
+  private async executeStepStreaming(options?: AgentRunOptions): Promise<boolean> {
+    const aiTools = this.buildAITools()
+    await this.runHook('onBeforeLLMCall', { agentState: this.state, step: this.state.step, messages: this.messages })
+    this.emit('llm:call', { step: this.state.step, messageCount: this.messages.length })
+    const provider = this.router.getDefault()
+    const stepStart = Date.now()
+
+    const stream = streamText({
+      model: provider.model,
+      system: this.systemPrompt,
+      messages: this.messages.slice(1),
+      tools: aiTools,
+      abortSignal: options?.signal,
+    })
+
+    let fullText = ''
+    for await (const chunk of (await stream).textStream) {
+      fullText += chunk
+      if (options?.onText) options.onText(chunk)
+    }
+
+    const finalResult = await (await stream)
+    const finalText = typeof finalResult.text === 'string' ? finalResult.text : fullText
+    const finalToolCalls = Array.isArray(finalResult.toolCalls) ? finalResult.toolCalls : []
+    return this.processStepResult(
+      finalText || undefined,
+      finalToolCalls,
+      finalResult.usage,
+      stepStart,
+      options,
+    )
+  }
+
+  private async processStepResult(
+    text: string | undefined,
+    toolCalls: any[] | undefined,
+    usage: any,
+    stepStart: number,
+    options?: AgentRunOptions,
+  ): Promise<boolean> {
+    const stepDuration = Date.now() - stepStart
+
+    if (usage) {
+      this.usage.recordTokens(usage.promptTokens ?? 0, usage.completionTokens ?? 0)
+      this.state.totalTokensUsed = this.usage.totalTokens
+      this.state.totalCost = this.usage.estimatedCost
+    }
+
+    await this.runHook('onAfterLLMCall', { agentState: this.state, step: this.state.step, messages: this.messages })
+    this.emit('llm:response', { step: this.state.step, tokensUsed: usage?.totalTokens })
+
+    const stepInfo: StepInfo = {
+      step: this.state.step,
+      text: text || undefined,
+      durationMs: stepDuration,
+      tokensUsed: usage ? { input: usage.promptTokens ?? 0, output: usage.completionTokens ?? 0 } : undefined,
+    }
+
+    if (toolCalls && toolCalls.length > 0) {
+      const toolResults: ToolResult[] = []
+      stepInfo.toolCalls = toolCalls.map(tc => ({ tool: tc.toolName, args: tc.args as Record<string, unknown> }))
+
+      for (const tc of toolCalls) {
+        const call: ToolCall = { tool: tc.toolName, args: tc.args as Record<string, unknown> }
+        const tr = await this.executeToolCall(call, options?.signal)
+        toolResults.push(tr)
+      }
+
+      stepInfo.toolResults = toolResults
+      this.messages.push({ role: 'assistant', content: text ?? '' })
+      for (const tr of toolResults) {
+        this.messages.push({
+          role: 'user',
+          content: `[Tool: ${tr.tool}] ${tr.error ? `Error: ${tr.error}` : JSON.stringify(tr.output)}`,
+        } as CoreMessage)
+      }
+    } else {
+      if (text) this.messages.push({ role: 'assistant', content: text })
+    }
+
+    this.steps.push(stepInfo)
+    this.usage.recordStep()
+    this.state.step++
+    if (options?.onStep) options.onStep(stepInfo)
+    this.emit('step', { step: this.state.step })
+
+    return !!(toolCalls?.length)
+  }
+
+  private async executeToolCall(call: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
+    const toolDef = this.registry.get(call.tool)
+    const approvalRequest: ApprovalRequest = {
+      tool: call.tool,
+      args: call.args,
+      permission: toolDef?.permission ?? { level: 'dangerous' as const },
+    }
+
+    const approval = await this.guard.check(approvalRequest)
+    if (approval === 'deny') {
+      this.emit('tool:denied', { tool: call.tool, args: call.args })
+      return { tool: call.tool, output: null, error: `Permission denied for "${call.tool}"`, durationMs: 0, approved: false }
+    }
+
+    this.emit('tool:approved', { tool: call.tool, args: call.args, approval })
+    const preHookResult = await this.runHook('onBeforeToolCall', { agentState: this.state, step: this.state.step, toolCall: call })
+    if (preHookResult?.action === 'deny') {
+      return { tool: call.tool, output: null, error: preHookResult.reason ?? 'Blocked by hook', durationMs: 0, approved: false }
+    }
+
+    this.emit('tool:call', { tool: call.tool, args: call.args })
+    this.usage.recordToolCall()
+    this.state.toolCallCount++
+
+    const toolCtx = createToolContext(
+      this.getSnapshot(), this.workingDir,
+      signal ?? new AbortController().signal,
+      (req: ApprovalRequest) => this.guard.check(req),
+    )
+
+    const toolResult = await this.engine.execute(call, toolCtx)
+    if (toolResult.output) toolResult.output = this.contextMgr.truncateToolOutput(toolResult.output)
+    this.emit('tool:result', { tool: call.tool, result: toolResult })
+
+    await this.runHook('onAfterToolCall', { agentState: this.state, step: this.state.step, toolCall: call, toolResult })
+    return toolResult
+  }
+
+  // ─── Build Result ────────────────────────────────────────────────
+
+  private buildResult(): AgentResult {
+    const finalText = this.extractFinalText()
+    this.runHook('onEnd', { agentState: this.state, step: this.state.step })  // fire and forget
+    this.emit('agent:end', { steps: this.state.step, durationMs: this.usage.elapsedMs, totalCost: this.usage.estimatedCost })
+
+    return {
+      text: finalText,
+      messages: this.messages,
+      state: { ...this.state, messages: this.messages },
+      steps: this.steps,
+      totalDurationMs: this.usage.elapsedMs,
+      usage: this.usage.snapshot(),
+    }
+  }
+
+  private resetState(): void {
+    this.state = this.createInitialState()
+    this.steps = []
+    this.messages = [{ role: 'system', content: this.systemPrompt }]
+    this.usage.reset()
+    this.guard.resetAllowAlways()
+    this.contextMgr.adaptToProvider()
+  }
+
+  // ─── Private Helpers ─────────────────────────────────────────────
 
   private buildAITools(): Record<string, Tool> {
     const tools: Record<string, Tool> = {}
@@ -344,10 +357,7 @@ export class Agent {
     return tools
   }
 
-  private async runHook(
-    name: HookName,
-    ctx: HookContext,
-  ): Promise<void | { action?: 'deny'; reason?: string }> {
+  private async runHook(name: HookName, ctx: HookContext): Promise<void | { action?: 'deny'; reason?: string }> {
     const fns = this.hooks.get(name) ?? []
     let result: void | { action?: 'deny'; reason?: string } | undefined
     for (const fn of fns) {
@@ -359,33 +369,24 @@ export class Agent {
 
   private emit(type: AgentEventName, data: Record<string, unknown>): void {
     const event: AgentEvent = { type, timestamp: Date.now(), data }
-    const handlers = this.eventHandlers.get(type) ?? []
-    for (const handler of handlers) {
+    for (const handler of this.eventHandlers.get(type) ?? []) {
       try { handler(event) } catch { /* swallow */ }
     }
   }
 
   private getSnapshot() {
-    return {
-      step: this.state.step,
-      totalTokensUsed: this.state.totalTokensUsed,
-      startTime: this.state.startTime,
-    }
+    return { step: this.state.step, totalTokensUsed: this.state.totalTokensUsed, startTime: this.state.startTime }
   }
 
   private extractFinalText(): string {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       if (this.messages[i].role === 'assistant') {
-        const content = this.messages[i].content
-        return typeof content === 'string' ? content : ''
+        const c = this.messages[i].content
+        return typeof c === 'string' ? c : ''
       }
     }
     return ''
   }
 }
 
-// ─── Factory ───────────────────────────────────────────────────────
-
-export function createAgent(config: AgentConfig): Agent {
-  return new Agent(config)
-}
+export function createAgent(config: AgentConfig): Agent { return new Agent(config) }

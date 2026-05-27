@@ -4,16 +4,9 @@ import type { ProviderRouter } from '@agentnova/providers'
 
 /**
  * Context Manager — keeps the conversation within token budget
- * by compressing older messages and truncating tool output.
+ * by compressing older messages, truncating tool output,
+ * and dynamically adapting to the current provider's context window.
  */
-export const DEFAULT_CONTEXT_CONFIG: ContextConfig = {
-  preserveRecentTurns: 10,
-  compressionTriggerRatio: 0.7,
-  compressionStrategy: 'hybrid',
-  maxToolOutputLength: 8_000,
-  toolOutputTruncate: 'tail',
-}
-
 export class ContextManager {
   private config: ContextConfig
 
@@ -24,32 +17,50 @@ export class ContextManager {
     this.config = config
   }
 
-  /** Estimate token count for messages (rough: 1 token ≈ 4 chars) */
+  // ─── Token Estimation ────────────────────────────────────────────
+
+  /**
+   * Estimate token count for messages.
+   * Uses a heuristic: ~4 chars per token for English, ~2 chars per token for CJK.
+   * Falls back to 3.5 chars/token average for mixed content.
+   */
   estimateTokens(messages: CoreMessage[]): number {
-    const total = messages.reduce((sum, msg) => {
-      if (typeof msg.content === 'string') {
-        return sum + Math.ceil(msg.content.length / 4)
-      }
-      // Handle array content (tool results, etc.)
-      if (Array.isArray(msg.content)) {
-        return sum + msg.content.reduce((s, part) => {
-          if (part.type === 'text') return s + Math.ceil(part.text.length / 4)
-          if (part.type === 'tool-result') {
-            const resultStr = typeof part.result === 'string' ? part.result : JSON.stringify(part.result)
-            return s + Math.ceil(resultStr.length / 4)
-          }
-          return s
-        }, 0)
-      }
-      return sum
-    }, 0)
+    let total = 0
+    for (const msg of messages) {
+      const text = this.extractText(msg)
+      total += this.estimateTextTokens(text)
+    }
+    // Add overhead per message (~4 tokens for role markers, formatting)
+    total += messages.length * 4
     return total
   }
 
-  /** Get the context window size for current provider */
+  /** Estimate tokens for a single text string */
+  estimateTextTokens(text: string): number {
+    if (!text) return 0
+    // Detect CJK ratio
+    const cjkChars = (text.match(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]/g) || []).length
+    const totalChars = text.length
+    const cjkRatio = totalChars > 0 ? cjkChars / totalChars : 0
+
+    // CJK: ~2 chars/token, English: ~4 chars/token, mixed: weighted
+    const charsPerToken = cjkRatio > 0.3 ? 2 : (4 - cjkRatio * 2)
+    return Math.ceil(totalChars / charsPerToken)
+  }
+
+  // ─── Context Window ──────────────────────────────────────────────
+
+  /** Get the context window size for the current default provider */
   getContextWindow(): number {
     const defaultProvider = this.router.getDefault()
     return defaultProvider.contextWindow ?? 128_000
+  }
+
+  /** Get usable context (reserve space for system prompt + response) */
+  getUsableContext(): number {
+    const window = this.getContextWindow()
+    // Reserve ~20% for system prompt + response generation
+    return Math.floor(window * 0.8)
   }
 
   /** Check if compression is needed */
@@ -59,6 +70,16 @@ export class ContextManager {
     return tokens > threshold
   }
 
+  /** Calculate how much we need to compress (0-1) */
+  compressionRatio(messages: CoreMessage[]): number {
+    const tokens = this.estimateTokens(messages)
+    const target = this.getUsableContext()
+    if (tokens <= target) return 0
+    return Math.min(1 - target / tokens, 0.7) // max 70% compression
+  }
+
+  // ─── Compression ─────────────────────────────────────────────────
+
   /**
    * Compress messages if needed.
    * Returns potentially reduced message array.
@@ -67,19 +88,17 @@ export class ContextManager {
     if (!this.needsCompression(messages)) return messages
 
     const [recent, older] = this.splitMessages(messages, this.config.preserveRecentTurns)
-
     if (older.length === 0) return recent
 
     switch (this.config.compressionStrategy) {
       case 'sliding-window':
-        return recent // Just drop older messages
+        return recent
 
       case 'summary': {
         if (summarizer) {
           const summary = await this.summarizeMessages(older, summarizer)
           return [summary, ...recent]
         }
-        // Without summarizer, fall back to sliding window
         return recent
       }
 
@@ -89,12 +108,13 @@ export class ContextManager {
           const summary = await this.summarizeMessages(older, summarizer)
           return [summary, ...recent]
         }
-        // Keep key messages (tool calls + user inputs), drop tool results
         const keyMessages = this.extractKeyMessages(older)
         return [...keyMessages, ...recent]
       }
     }
   }
+
+  // ─── Tool Output Handling ────────────────────────────────────────
 
   /** Truncate a tool output to fit budget */
   truncateToolOutput(output: unknown): string {
@@ -102,14 +122,30 @@ export class ContextManager {
     if (str.length <= this.config.maxToolOutputLength) return str
 
     if (this.config.toolOutputTruncate === 'head') {
-      return '... [truncated]\n' + str.slice(-this.config.maxToolOutputLength)
+      return str.slice(0, this.config.maxToolOutputLength) + '\n... [truncated]'
     }
-    return str.slice(0, this.config.maxToolOutputLength) + '\n... [truncated]'
+    // Default: tail (keep the end, more useful for logs)
+    return '... [truncated]\n' + str.slice(-this.config.maxToolOutputLength)
   }
+
+  // ─── Message Priorities ──────────────────────────────────────────
+
+  /** Assign priority to a message (higher = more important to keep) */
+  messagePriority(msg: CoreMessage): number {
+    // System messages: highest priority
+    if (msg.role === 'system') return 100
+    // User messages: high priority
+    if (msg.role === 'user') return 80
+    // Assistant messages with no tool calls: medium-high
+    if (msg.role === 'assistant') return 60
+    // Tool messages: low priority (can be summarized)
+    return 20
+  }
+
+  // ─── Private Helpers ─────────────────────────────────────────────
 
   /** Split messages at the N-th most recent turn boundary */
   private splitMessages(messages: CoreMessage[], preserveRecent: number): [CoreMessage[], CoreMessage[]] {
-    // Count "turns" — a turn = user message + assistant message + optional tool results
     let turnCount = 0
     let splitIndex = messages.length
 
@@ -126,14 +162,14 @@ export class ContextManager {
     return [messages.slice(splitIndex), messages.slice(0, splitIndex)]
   }
 
-  /** Summarize a block of older messages */
+  /** Summarize a block of older messages using LLM */
   private async summarizeMessages(
     messages: CoreMessage[],
     summarizer: (text: string) => Promise<string>,
   ): Promise<CoreMessage> {
     const text = messages
       .map((m) => {
-        const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+        const content = this.extractText(m)
         return `[${m.role}]: ${content}`
       })
       .join('\n')
@@ -145,17 +181,61 @@ export class ContextManager {
     }
   }
 
-  /** Extract key messages (user + assistant without large tool results) */
+  /** Extract key messages (user + assistant, compress tool results) */
   private extractKeyMessages(messages: CoreMessage[]): CoreMessage[] {
     return messages.map((msg) => {
-      if (msg.role === 'tool') {
-        // Truncate tool results to essential info
-        const truncated = this.truncateToolOutput(
-          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
-        )
-        return { role: 'user' as const, content: `[Tool Output]: ${truncated}` }
+      const text = this.extractText(msg)
+      if (msg.role === 'system' || msg.role === 'user') return msg
+      if (msg.role === 'assistant') {
+        // Keep assistant messages but strip empty ones
+        return text.trim() ? msg : null
       }
-      return msg
-    })
+      // Tool/user-as-tool: compress to short form
+      return {
+        role: 'user' as const,
+        content: `[Tool Output]: ${this.truncateToolOutput(text)}`,
+      }
+    }).filter(Boolean) as CoreMessage[]
   }
+
+  /** Extract plain text from a message */
+  private extractText(msg: CoreMessage): string {
+    if (typeof msg.content === 'string') return msg.content
+    if (Array.isArray(msg.content)) {
+      return msg.content
+        .map((part) => {
+          if (part.type === 'text') return part.text
+          if ('text' in part && typeof part.text === 'string') return part.text
+          return ''
+        })
+        .join('\n')
+    }
+    return ''
+  }
+
+  // ─── Adaptive Window ─────────────────────────────────────────────
+
+  /**
+   * Adapt compression settings based on the current provider.
+   * Called when the active provider changes.
+   */
+  adaptToProvider(): void {
+    const window = this.getContextWindow()
+    // Adjust preserveRecentTurns based on context window size
+    if (window <= 32_000) {
+      this.config = { ...this.config, preserveRecentTurns: 5, compressionTriggerRatio: 0.5 }
+    } else if (window <= 128_000) {
+      this.config = { ...this.config, preserveRecentTurns: 10, compressionTriggerRatio: 0.7 }
+    } else {
+      this.config = { ...this.config, preserveRecentTurns: 15, compressionTriggerRatio: 0.75 }
+    }
+  }
+}
+
+export const DEFAULT_CONTEXT_CONFIG: ContextConfig = {
+  preserveRecentTurns: 10,
+  compressionTriggerRatio: 0.7,
+  compressionStrategy: 'hybrid',
+  maxToolOutputLength: 8_000,
+  toolOutputTruncate: 'tail',
 }

@@ -1,6 +1,7 @@
 export {
   PermissionGuard,
   DEFAULT_PERMISSION_CONFIG,
+  DEFAULT_SANDBOX,
   DEFAULT_LIMITS,
 } from './guard.js'
 

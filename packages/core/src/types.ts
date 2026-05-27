@@ -1,7 +1,8 @@
+import type { CoreMessage } from 'ai'
 import type { ToolDefinition, ToolCall, ToolResult, ToolContext, AgentStateSnapshot, ToolLogger } from '@agentnova/tools'
 import type { PermissionGuard, PermissionConfig, ResourceLimits } from '@agentnova/permission'
 import type { ProviderRouter, ProviderConfig } from '@agentnova/providers'
-import type { CoreMessage } from 'ai'
+import type { UsageSnapshot } from './usage.js'
 
 // ─── Agent Events ──────────────────────────────────────────────────
 
@@ -73,14 +74,6 @@ export interface ContextConfig {
   contextWindowOverrides?: Record<string, number>
 }
 
-export const DEFAULT_CONTEXT_CONFIG: ContextConfig = {
-  preserveRecentTurns: 10,
-  compressionTriggerRatio: 0.7,
-  compressionStrategy: 'hybrid',
-  maxToolOutputLength: 8_000,
-  toolOutputTruncate: 'tail',
-}
-
 // ─── Agent State ───────────────────────────────────────────────────
 
 export interface AgentState {
@@ -142,4 +135,5 @@ export interface AgentResult {
   state: AgentState
   steps: StepInfo[]
   totalDurationMs: number
+  usage?: UsageSnapshot
 }
