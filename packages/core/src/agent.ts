@@ -1,13 +1,15 @@
 import { generateText, streamText, type CoreMessage, type Tool } from 'ai'
 import { z } from 'zod'
 import { ToolRegistry, ToolEngine } from '@agentnova/tools'
-import type { ToolDefinition, ToolCall, ToolResult, ToolContext } from '@agentnova/tools'
+import type { ToolDefinition, ToolCall, ToolResult } from '@agentnova/tools'
 import { PermissionGuard, DEFAULT_PERMISSION_CONFIG, DEFAULT_LIMITS } from '@agentnova/permission'
 import type { PermissionConfig, ResourceLimits, ApprovalRequest } from '@agentnova/permission'
 import { ProviderRouter } from '@agentnova/providers'
 import { ContextManager, DEFAULT_CONTEXT_CONFIG } from './context.js'
 import { UsageTracker, getPricing, ResourceLimitError, type UsageSnapshot } from './usage.js'
 import { createToolContext } from './logger.js'
+import { WorkingMemory, ProjectMemory, MemoryInjector, LongTermMemory } from '@agentnova/memory'
+import type { LongTermMemoryConfig } from '@agentnova/memory'
 import type {
   AgentConfig,
   AgentState,
@@ -42,6 +44,16 @@ export class Agent {
   private state: AgentState
   private messages: CoreMessage[] = []
 
+  // Memory
+  private workingMemory: WorkingMemory
+  private projectMemory: ProjectMemory
+  private longTermMemory?: LongTermMemory
+  private memoryInjector: MemoryInjector
+
+  // Skills
+  private skills: SkillLoaderWorker
+  private skillDirs: string[]
+
   private hooks: Map<HookName, HookFn[]> = new Map()
   private eventHandlers: Map<AgentEventName, EventHandler[]> = new Map()
   private steps: StepInfo[] = []
@@ -71,8 +83,58 @@ export class Agent {
     const provider = this.router.getDefault()
     this.usage = new UsageTracker(getPricing(provider.id), this.limits)
 
+    // Init memory
+    this.workingMemory = new WorkingMemory()
+    this.projectMemory = new ProjectMemory(this.workingDir)
+    this.projectMemory.load() // fire and forget
+    if (config.longTermMemory) {
+      this.longTermMemory = new LongTermMemory(config.longTermMemory)
+    }
+    this.memoryInjector = new MemoryInjector(
+      this.workingMemory,
+      this.projectMemory,
+      this.longTermMemory,
+    )
+
+    // Init skills
+    this.skills = new SkillLoaderWorker()
+    this.skillDirs = config.skillDirs ?? []
+    if (this.skillDirs.length > 0) {
+      this.skills.loadAll(this.skillDirs)
+    }
+
     this.state = this.createInitialState()
     this.messages = [{ role: 'system', content: this.systemPrompt }]
+  }
+
+  /** Build enriched system prompt with memory and skills context */
+  private async buildSystemPrompt(): Promise<string> {
+    const parts: string[] = [this.systemPrompt]
+
+    // Project memory
+    try {
+      const projectItems = await this.projectMemory.list()
+      if (projectItems.length > 0) {
+        const memories = await this.projectMemory.search('', 20)
+        if (memories.length > 0) {
+          parts.push('\n## Project Memory')
+          for (const m of memories) {
+            parts.push(`- ${m.key}: ${m.content}`)
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Skills prompt fragments
+    const skillPrompts = this.skills.getActivePrompts()
+    if (skillPrompts.length > 0) {
+      parts.push('\n## Active Skills')
+      for (const p of skillPrompts) {
+        parts.push(p)
+      }
+    }
+
+    return parts.join('\n')
   }
 
   private createInitialState(): AgentState {
@@ -91,8 +153,7 @@ export class Agent {
 
   /** Run the agent with a user prompt (non-streaming) */
   async run(prompt: string, options?: AgentRunOptions): Promise<AgentResult> {
-    this.resetState()
-    this.messages.push({ role: 'user', content: prompt })
+    await this.resetState(prompt)
     this.emit('agent:start', { prompt })
     await this.runHook('onStart', { agentState: this.state, step: 0 })
 
@@ -104,10 +165,15 @@ export class Agent {
         if (signal?.aborted || this.state.aborted) { this.state.aborted = true; break }
         const limitCheck = this.usage.isLimitExceeded()
         if (limitCheck.exceeded) { this.emit('agent:error', { error: limitCheck.reason, step: this.state.step }); break }
+
+        // Inject relevant memories before each LLM call
+        await this.injectMemories(prompt)
+
         if (this.contextMgr.needsCompression(this.messages)) {
           this.messages = await this.contextMgr.compress(this.messages)
           this.emit('context:compressed', { step: this.state.step })
         }
+
         const shouldContinue = await this.executeStep(options)
         if (!shouldContinue) break
       }
@@ -126,8 +192,7 @@ export class Agent {
 
   /** Run the agent with streaming output */
   async runStream(prompt: string, options?: AgentRunOptions): Promise<AgentResult> {
-    this.resetState()
-    this.messages.push({ role: 'user', content: prompt })
+    await this.resetState(prompt)
     this.emit('agent:start', { prompt })
 
     const signal = options?.signal
@@ -138,10 +203,14 @@ export class Agent {
         if (signal?.aborted || this.state.aborted) { this.state.aborted = true; break }
         const limitCheck = this.usage.isLimitExceeded()
         if (limitCheck.exceeded) { this.emit('agent:error', { error: limitCheck.reason, step: this.state.step }); break }
+
+        await this.injectMemories(prompt)
+
         if (this.contextMgr.needsCompression(this.messages)) {
           this.messages = await this.contextMgr.compress(this.messages)
           this.emit('context:compressed', { step: this.state.step })
         }
+
         const shouldContinue = await this.executeStepStreaming(options)
         if (!shouldContinue) break
       }
@@ -165,10 +234,42 @@ export class Agent {
   }
 
   getState(): Readonly<AgentState> { return { ...this.state } }
-
   getUsage(): UsageSnapshot { return this.usage.snapshot() }
-
   abort(): void { this.state.aborted = true }
+
+  /** Store a memory item */
+  async remember(key: string, content: string, layer?: 'working' | 'project' | 'longterm'): Promise<void> {
+    await this.memoryInjector.store(key, content, { layer })
+  }
+
+  // ─── Memory Injection ────────────────────────────────────────────
+
+  private async injectMemories(prompt: string): Promise<void> {
+    const memoryContext = await this.memoryInjector.inject(prompt, 5)
+    if (memoryContext) {
+      // Find and update the system message with memory context
+      const sysIdx = this.messages.findIndex(m => typeof m.content === 'string' && m.content.includes('Project Memory'))
+      if (sysIdx >= 0) {
+        // Already has memory injected, update it
+        // For simplicity, we inject as a system message after the first one
+      } else {
+        // Inject as a user-like context message
+        this.messages.splice(1, 0, { role: 'system', content: memoryContext })
+      }
+    }
+
+    // Activate skills based on prompt
+    const active = this.skills.activateForInput(prompt)
+    if (active.length > 0) {
+      const skillTools = this.skills.getActiveTools()
+      for (const tool of skillTools) {
+        if (!this.registry.has(tool.name)) {
+          this.registry.register(tool)
+        }
+      }
+      this.emit('skill:activated', { skills: active.map(s => s.name) })
+    }
+  }
 
   // ─── Step Execution ──────────────────────────────────────────────
 
@@ -197,7 +298,7 @@ export class Agent {
     const provider = this.router.getDefault()
     const stepStart = Date.now()
 
-    const stream = streamText({
+    const streamResults = streamText({
       model: provider.model,
       system: this.systemPrompt,
       messages: this.messages.slice(1),
@@ -205,19 +306,19 @@ export class Agent {
       abortSignal: options?.signal,
     })
 
+    const consumed = await streamResults
     let fullText = ''
-    for await (const chunk of (await stream).textStream) {
+    for await (const chunk of consumed.textStream) {
       fullText += chunk
       if (options?.onText) options.onText(chunk)
     }
 
-    const finalResult = await (await stream)
-    const finalText = typeof finalResult.text === 'string' ? finalResult.text : fullText
-    const finalToolCalls = Array.isArray(finalResult.toolCalls) ? finalResult.toolCalls : []
+    const finalText = typeof consumed.text === 'string' ? consumed.text : fullText
+    const finalToolCalls = Array.isArray(consumed.toolCalls) ? consumed.toolCalls : []
     return this.processStepResult(
       finalText || undefined,
       finalToolCalls,
-      finalResult.usage,
+      consumed.usage,
       stepStart,
       options,
     )
@@ -321,7 +422,7 @@ export class Agent {
 
   private buildResult(): AgentResult {
     const finalText = this.extractFinalText()
-    this.runHook('onEnd', { agentState: this.state, step: this.state.step })  // fire and forget
+    this.runHook('onEnd', { agentState: this.state, step: this.state.step })
     this.emit('agent:end', { steps: this.state.step, durationMs: this.usage.elapsedMs, totalCost: this.usage.estimatedCost })
 
     return {
@@ -334,10 +435,11 @@ export class Agent {
     }
   }
 
-  private resetState(): void {
+  private async resetState(prompt: string): Promise<void> {
     this.state = this.createInitialState()
     this.steps = []
-    this.messages = [{ role: 'system', content: this.systemPrompt }]
+    this.messages = [{ role: 'system', content: await this.buildSystemPrompt() }]
+    this.messages.push({ role: 'user', content: prompt })
     this.usage.reset()
     this.guard.resetAllowAlways()
     this.contextMgr.adaptToProvider()
@@ -346,12 +448,20 @@ export class Agent {
   // ─── Private Helpers ─────────────────────────────────────────────
 
   private buildAITools(): Record<string, Tool> {
+    // Merge built-in tools + skill tools
+    const allTools = [
+      ...this.registry.getAll(),
+      ...this.skills.getActiveTools(),
+    ]
+
     const tools: Record<string, Tool> = {}
-    for (const toolDef of this.registry.getAll()) {
-      tools[toolDef.name] = {
-        description: toolDef.description,
-        parameters: toolDef.parameters as z.ZodTypeAny,
-        execute: async (args: unknown) => args,
+    for (const toolDef of allTools) {
+      if (!tools[toolDef.name]) {
+        tools[toolDef.name] = {
+          description: toolDef.description,
+          parameters: toolDef.parameters as z.ZodTypeAny,
+          execute: async (args: unknown) => args,
+        }
       }
     }
     return tools
@@ -390,3 +500,41 @@ export class Agent {
 }
 
 export function createAgent(config: AgentConfig): Agent { return new Agent(config) }
+
+// ─── Skill Loader Worker (lightweight wrapper) ─────────────────────
+
+class SkillLoaderWorker {
+  private skills: Array<{ name: string; tools: ToolDefinition[]; prompt: string; active: boolean; activateOn?: (input: string) => boolean }> = []
+
+  async loadAll(dirs: string[]) {
+    const { SkillLoader } = await import('@agentnova/skills')
+    const loader = new SkillLoader()
+    this.skills = await loader.loadAll(dirs)
+  }
+
+  activateForInput(input: string): Array<{ name: string; active: boolean }> {
+    const active: Array<{ name: string; active: boolean }> = []
+    for (const skill of this.skills) {
+      if (skill.activateOn) {
+        if (skill.activateOn(input)) {
+          if (!skill.active) {
+            skill.active = true
+            active.push(skill)
+          }
+        }
+      }
+    }
+    return active
+  }
+
+  getActiveTools(): ToolDefinition[] {
+    return this.skills.filter(s => s.active).flatMap(s => s.tools)
+  }
+
+  getActivePrompts(): string[] {
+    return this.skills.filter(s => s.active && s.prompt).map(s => s.prompt)
+  }
+}
+
+// Re-export types
+export type { UsageSnapshot } from './usage.js'

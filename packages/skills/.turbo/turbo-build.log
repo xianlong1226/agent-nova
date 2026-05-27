@@ -77,6 +77,6 @@ ESM dist/index.js     3.99 KB
 ESM dist/index.js.map 8.71 KB
 ESM ⚡️ Build success in 10ms
 DTS Build start
-DTS ⚡️ Build success in 238ms
+DTS ⚡️ Build success in 236ms
 DTS dist/index.d.ts  2.23 KB
 DTS dist/index.d.cts 2.23 KB

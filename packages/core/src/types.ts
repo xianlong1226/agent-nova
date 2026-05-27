@@ -3,6 +3,7 @@ import type { ToolDefinition, ToolCall, ToolResult, ToolContext, AgentStateSnaps
 import type { PermissionGuard, PermissionConfig, ResourceLimits } from '@agentnova/permission'
 import type { ProviderRouter, ProviderConfig } from '@agentnova/providers'
 import type { UsageSnapshot } from './usage.js'
+import type { LongTermMemoryConfig } from '@agentnova/memory'
 
 // ─── Agent Events ──────────────────────────────────────────────────
 
@@ -101,6 +102,10 @@ export interface AgentConfig {
   permissions?: Partial<PermissionConfig>
   /** Context management configuration */
   context?: Partial<ContextConfig>
+  /** Long-term memory configuration (SQLite-backed) */
+  longTermMemory?: LongTermMemoryConfig
+  /** Skill directories to load */
+  skillDirs?: string[]
   /** Custom model for this agent (overrides router default) */
   model?: string
 }

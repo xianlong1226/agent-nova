@@ -1,7 +1,9 @@
 "use strict";
+var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -15,6 +17,14 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/index.ts
@@ -347,6 +357,7 @@ function createToolContext(state, workingDir, abortSignal, approvalFn) {
 }
 
 // src/agent.ts
+var import_memory = require("@agentnova/memory");
 var Agent = class {
   registry;
   engine;
@@ -361,6 +372,14 @@ var Agent = class {
   contextConfig;
   state;
   messages = [];
+  // Memory
+  workingMemory;
+  projectMemory;
+  longTermMemory;
+  memoryInjector;
+  // Skills
+  skills;
+  skillDirs;
   hooks = /* @__PURE__ */ new Map();
   eventHandlers = /* @__PURE__ */ new Map();
   steps = [];
@@ -382,8 +401,49 @@ var Agent = class {
     this.limits = { ...import_permission.DEFAULT_LIMITS, ...this.permissions.limits };
     const provider = this.router.getDefault();
     this.usage = new UsageTracker(getPricing(provider.id), this.limits);
+    this.workingMemory = new import_memory.WorkingMemory();
+    this.projectMemory = new import_memory.ProjectMemory(this.workingDir);
+    this.projectMemory.load();
+    if (config.longTermMemory) {
+      this.longTermMemory = new import_memory.LongTermMemory(config.longTermMemory);
+    }
+    this.memoryInjector = new import_memory.MemoryInjector(
+      this.workingMemory,
+      this.projectMemory,
+      this.longTermMemory
+    );
+    this.skills = new SkillLoaderWorker();
+    this.skillDirs = config.skillDirs ?? [];
+    if (this.skillDirs.length > 0) {
+      this.skills.loadAll(this.skillDirs);
+    }
     this.state = this.createInitialState();
     this.messages = [{ role: "system", content: this.systemPrompt }];
+  }
+  /** Build enriched system prompt with memory and skills context */
+  async buildSystemPrompt() {
+    const parts = [this.systemPrompt];
+    try {
+      const projectItems = await this.projectMemory.list();
+      if (projectItems.length > 0) {
+        const memories = await this.projectMemory.search("", 20);
+        if (memories.length > 0) {
+          parts.push("\n## Project Memory");
+          for (const m of memories) {
+            parts.push(`- ${m.key}: ${m.content}`);
+          }
+        }
+      }
+    } catch {
+    }
+    const skillPrompts = this.skills.getActivePrompts();
+    if (skillPrompts.length > 0) {
+      parts.push("\n## Active Skills");
+      for (const p of skillPrompts) {
+        parts.push(p);
+      }
+    }
+    return parts.join("\n");
   }
   createInitialState() {
     return {
@@ -399,8 +459,7 @@ var Agent = class {
   // ─── Public API ──────────────────────────────────────────────────
   /** Run the agent with a user prompt (non-streaming) */
   async run(prompt, options) {
-    this.resetState();
-    this.messages.push({ role: "user", content: prompt });
+    await this.resetState(prompt);
     this.emit("agent:start", { prompt });
     await this.runHook("onStart", { agentState: this.state, step: 0 });
     const signal = options?.signal;
@@ -416,6 +475,7 @@ var Agent = class {
           this.emit("agent:error", { error: limitCheck.reason, step: this.state.step });
           break;
         }
+        await this.injectMemories(prompt);
         if (this.contextMgr.needsCompression(this.messages)) {
           this.messages = await this.contextMgr.compress(this.messages);
           this.emit("context:compressed", { step: this.state.step });
@@ -437,8 +497,7 @@ var Agent = class {
   }
   /** Run the agent with streaming output */
   async runStream(prompt, options) {
-    this.resetState();
-    this.messages.push({ role: "user", content: prompt });
+    await this.resetState(prompt);
     this.emit("agent:start", { prompt });
     const signal = options?.signal;
     const maxSteps = options?.maxSteps ?? this.limits.maxSteps;
@@ -453,6 +512,7 @@ var Agent = class {
           this.emit("agent:error", { error: limitCheck.reason, step: this.state.step });
           break;
         }
+        await this.injectMemories(prompt);
         if (this.contextMgr.needsCompression(this.messages)) {
           this.messages = await this.contextMgr.compress(this.messages);
           this.emit("context:compressed", { step: this.state.step });
@@ -488,6 +548,31 @@ var Agent = class {
   abort() {
     this.state.aborted = true;
   }
+  /** Store a memory item */
+  async remember(key, content, layer) {
+    await this.memoryInjector.store(key, content, { layer });
+  }
+  // ─── Memory Injection ────────────────────────────────────────────
+  async injectMemories(prompt) {
+    const memoryContext = await this.memoryInjector.inject(prompt, 5);
+    if (memoryContext) {
+      const sysIdx = this.messages.findIndex((m) => typeof m.content === "string" && m.content.includes("Project Memory"));
+      if (sysIdx >= 0) {
+      } else {
+        this.messages.splice(1, 0, { role: "system", content: memoryContext });
+      }
+    }
+    const active = this.skills.activateForInput(prompt);
+    if (active.length > 0) {
+      const skillTools = this.skills.getActiveTools();
+      for (const tool of skillTools) {
+        if (!this.registry.has(tool.name)) {
+          this.registry.register(tool);
+        }
+      }
+      this.emit("skill:activated", { skills: active.map((s) => s.name) });
+    }
+  }
   // ─── Step Execution ──────────────────────────────────────────────
   async executeStep(options) {
     const aiTools = this.buildAITools();
@@ -510,25 +595,25 @@ var Agent = class {
     this.emit("llm:call", { step: this.state.step, messageCount: this.messages.length });
     const provider = this.router.getDefault();
     const stepStart = Date.now();
-    const stream = (0, import_ai.streamText)({
+    const streamResults = (0, import_ai.streamText)({
       model: provider.model,
       system: this.systemPrompt,
       messages: this.messages.slice(1),
       tools: aiTools,
       abortSignal: options?.signal
     });
+    const consumed = await streamResults;
     let fullText = "";
-    for await (const chunk of (await stream).textStream) {
+    for await (const chunk of consumed.textStream) {
       fullText += chunk;
       if (options?.onText) options.onText(chunk);
     }
-    const finalResult = await await stream;
-    const finalText = typeof finalResult.text === "string" ? finalResult.text : fullText;
-    const finalToolCalls = Array.isArray(finalResult.toolCalls) ? finalResult.toolCalls : [];
+    const finalText = typeof consumed.text === "string" ? consumed.text : fullText;
+    const finalToolCalls = Array.isArray(consumed.toolCalls) ? consumed.toolCalls : [];
     return this.processStepResult(
       finalText || void 0,
       finalToolCalls,
-      finalResult.usage,
+      consumed.usage,
       stepStart,
       options
     );
@@ -620,23 +705,30 @@ var Agent = class {
       usage: this.usage.snapshot()
     };
   }
-  resetState() {
+  async resetState(prompt) {
     this.state = this.createInitialState();
     this.steps = [];
-    this.messages = [{ role: "system", content: this.systemPrompt }];
+    this.messages = [{ role: "system", content: await this.buildSystemPrompt() }];
+    this.messages.push({ role: "user", content: prompt });
     this.usage.reset();
     this.guard.resetAllowAlways();
     this.contextMgr.adaptToProvider();
   }
   // ─── Private Helpers ─────────────────────────────────────────────
   buildAITools() {
+    const allTools = [
+      ...this.registry.getAll(),
+      ...this.skills.getActiveTools()
+    ];
     const tools = {};
-    for (const toolDef of this.registry.getAll()) {
-      tools[toolDef.name] = {
-        description: toolDef.description,
-        parameters: toolDef.parameters,
-        execute: async (args) => args
-      };
+    for (const toolDef of allTools) {
+      if (!tools[toolDef.name]) {
+        tools[toolDef.name] = {
+          description: toolDef.description,
+          parameters: toolDef.parameters,
+          execute: async (args) => args
+        };
+      }
     }
     return tools;
   }
@@ -674,6 +766,34 @@ var Agent = class {
 function createAgent(config) {
   return new Agent(config);
 }
+var SkillLoaderWorker = class {
+  skills = [];
+  async loadAll(dirs) {
+    const { SkillLoader } = await import("@agentnova/skills");
+    const loader = new SkillLoader();
+    this.skills = await loader.loadAll(dirs);
+  }
+  activateForInput(input) {
+    const active = [];
+    for (const skill of this.skills) {
+      if (skill.activateOn) {
+        if (skill.activateOn(input)) {
+          if (!skill.active) {
+            skill.active = true;
+            active.push(skill);
+          }
+        }
+      }
+    }
+    return active;
+  }
+  getActiveTools() {
+    return this.skills.filter((s) => s.active).flatMap((s) => s.tools);
+  }
+  getActivePrompts() {
+    return this.skills.filter((s) => s.active && s.prompt).map((s) => s.prompt);
+  }
+};
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   Agent,

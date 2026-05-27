@@ -2,6 +2,7 @@ import { ToolDefinition, ToolCall, ToolResult } from '@agentnova/tools';
 import { ResourceLimits, PermissionConfig } from '@agentnova/permission';
 import { CoreMessage } from 'ai';
 import { ProviderRouter } from '@agentnova/providers';
+import { LongTermMemoryConfig } from '@agentnova/memory';
 
 interface TokenPrice {
     inputPer1M: number;
@@ -110,6 +111,10 @@ interface AgentConfig {
     permissions?: Partial<PermissionConfig>;
     /** Context management configuration */
     context?: Partial<ContextConfig>;
+    /** Long-term memory configuration (SQLite-backed) */
+    longTermMemory?: LongTermMemoryConfig;
+    /** Skill directories to load */
+    skillDirs?: string[];
     /** Custom model for this agent (overrides router default) */
     model?: string;
 }
@@ -157,10 +162,18 @@ declare class Agent {
     private contextConfig;
     private state;
     private messages;
+    private workingMemory;
+    private projectMemory;
+    private longTermMemory?;
+    private memoryInjector;
+    private skills;
+    private skillDirs;
     private hooks;
     private eventHandlers;
     private steps;
     constructor(config: AgentConfig);
+    /** Build enriched system prompt with memory and skills context */
+    private buildSystemPrompt;
     private createInitialState;
     /** Run the agent with a user prompt (non-streaming) */
     run(prompt: string, options?: AgentRunOptions): Promise<AgentResult>;
@@ -172,6 +185,9 @@ declare class Agent {
     getState(): Readonly<AgentState>;
     getUsage(): UsageSnapshot;
     abort(): void;
+    /** Store a memory item */
+    remember(key: string, content: string, layer?: 'working' | 'project' | 'longterm'): Promise<void>;
+    private injectMemories;
     private executeStep;
     private executeStepStreaming;
     private processStepResult;
