@@ -1,27 +1,26 @@
 import { z } from 'zod'
-import { defineTool } from './types.js'
+import { defineTool, type ToolContext } from '../types.js'
 import { readFile as fsReadFile, readdir, stat, writeFile as fsWriteFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join, resolve, relative } from 'path'
-import type { ToolContext } from './types.js'
 
 // ─── fs.readFile ───────────────────────────────────────────────────
 
 export const readFile = defineTool({
   name: 'fs.readFile',
   description:
-    'Read the contents of a file at the given path. Returns the file content as a string. Use relative paths from the working directory.',
+    'Read the contents of a file at the given path. Returns the file content as a string.',
   parameters: z.object({
     path: z.string().describe('Relative or absolute file path to read'),
     encoding: z.enum(['utf-8', 'base64']).default('utf-8').describe('File encoding'),
   }),
   permission: { level: 'read', description: 'Read file contents' },
-  execute: async ({ path, encoding }, ctx) => {
-    const resolvedPath = resolve(ctx.workingDir, path)
+  execute: async (input: { path: string; encoding: string }, ctx: ToolContext) => {
+    const resolvedPath = resolve(ctx.workingDir, input.path)
     ctx.logger.info('Reading file', { path: resolvedPath })
 
     try {
-      const content = await fsReadFile(resolvedPath, encoding as BufferEncoding)
+      const content = await fsReadFile(resolvedPath, input.encoding as BufferEncoding)
       return { content: String(content), path: resolvedPath }
     } catch (err) {
       throw new Error(`Failed to read file "${resolvedPath}": ${err instanceof Error ? err.message : String(err)}`)
@@ -34,24 +33,23 @@ export const readFile = defineTool({
 export const writeFile = defineTool({
   name: 'fs.writeFile',
   description:
-    'Write content to a file. Creates the file if it does not exist, overwrites if it does. Will create parent directories if needed.',
+    'Write content to a file. Creates the file if it does not exist, overwrites if it does.',
   parameters: z.object({
     path: z.string().describe('Relative or absolute file path to write'),
     content: z.string().describe('Content to write to the file'),
   }),
   permission: { level: 'write', scope: ['**'], description: 'Write file contents' },
-  execute: async ({ path, content }, ctx) => {
-    const resolvedPath = resolve(ctx.workingDir, path)
+  execute: async (input: { path: string; content: string }, ctx: ToolContext) => {
+    const resolvedPath = resolve(ctx.workingDir, input.path)
     ctx.logger.info('Writing file', { path: resolvedPath })
 
-    // Create parent directories if needed
     const dir = join(resolvedPath, '..')
     if (!existsSync(dir)) {
       await mkdir(dir, { recursive: true })
     }
 
-    await fsWriteFile(resolvedPath, content, 'utf-8')
-    return { success: true, path: resolvedPath, bytesWritten: Buffer.byteLength(content) }
+    await fsWriteFile(resolvedPath, input.content, 'utf-8')
+    return { success: true, path: resolvedPath, bytesWritten: Buffer.byteLength(input.content) }
   },
 })
 
@@ -59,30 +57,27 @@ export const writeFile = defineTool({
 
 export const listDir = defineTool({
   name: 'fs.listDir',
-  description:
-    'List files and directories at the given path. Returns names with type indicators (file/dir).',
+  description: 'List files and directories at the given path.',
   parameters: z.object({
     path: z.string().default('.').describe('Directory path to list'),
     recursive: z.boolean().default(false).describe('Whether to list recursively'),
   }),
   permission: { level: 'read', description: 'List directory contents' },
-  execute: async ({ path, recursive }, ctx) => {
-    const resolvedPath = resolve(ctx.workingDir, path)
-    ctx.logger.info('Listing directory', { path: resolvedPath, recursive })
+  execute: async (input: { path: string; recursive: boolean }, ctx: ToolContext) => {
+    const resolvedPath = resolve(ctx.workingDir, input.path)
+    ctx.logger.info('Listing directory', { path: resolvedPath, recursive: input.recursive })
 
     const entries: Array<{ name: string; type: 'file' | 'dir'; path: string }> = []
 
     async function walk(dir: string, depth: number = 0): Promise<void> {
-      if (recursive && depth > 10) return // Safety limit
-      
+      if (input.recursive && depth > 10) return
       const items = await readdir(dir, { withFileTypes: true })
       for (const item of items) {
         const fullPath = join(dir, item.name)
         const relPath = relative(ctx.workingDir, fullPath)
-        
         if (item.isDirectory()) {
           entries.push({ name: item.name, type: 'dir', path: relPath })
-          if (recursive) await walk(fullPath, depth + 1)
+          if (input.recursive) await walk(fullPath, depth + 1)
         } else if (item.isFile()) {
           entries.push({ name: item.name, type: 'file', path: relPath })
         }
@@ -103,8 +98,8 @@ export const fsStat = defineTool({
     path: z.string().describe('Path to stat'),
   }),
   permission: { level: 'read', description: 'Read file metadata' },
-  execute: async ({ path }, ctx) => {
-    const resolvedPath = resolve(ctx.workingDir, path)
+  execute: async (input: { path: string }, ctx: ToolContext) => {
+    const resolvedPath = resolve(ctx.workingDir, input.path)
     const stats = await stat(resolvedPath)
     return {
       path: resolvedPath,

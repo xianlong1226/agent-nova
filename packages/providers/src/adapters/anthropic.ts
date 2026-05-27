@@ -1,9 +1,9 @@
-import { anthropic } from '@ai-sdk/anthropic'
+import { createAnthropic } from '@ai-sdk/anthropic'
 import type { ProviderConfig } from '../router.js'
 
 /** Preset: Anthropic Claude Sonnet 4 */
 export function claudeSonnet4(apiKey?: string): ProviderConfig {
-  const provider = anthropic({
+  const provider = createAnthropic({
     apiKey: apiKey ?? process.env.ANTHROPIC_API_KEY,
   })
 
@@ -19,7 +19,7 @@ export function claudeSonnet4(apiKey?: string): ProviderConfig {
 
 /** Preset: Anthropic Claude Haiku 3.5 */
 export function claudeHaiku35(apiKey?: string): ProviderConfig {
-  const provider = anthropic({
+  const provider = createAnthropic({
     apiKey: apiKey ?? process.env.ANTHROPIC_API_KEY,
   })
 

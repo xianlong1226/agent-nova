@@ -6,6 +6,14 @@ import type { ProviderRouter } from '@agentnova/providers'
  * Context Manager — keeps the conversation within token budget
  * by compressing older messages and truncating tool output.
  */
+export const DEFAULT_CONTEXT_CONFIG: ContextConfig = {
+  preserveRecentTurns: 10,
+  compressionTriggerRatio: 0.7,
+  compressionStrategy: 'hybrid',
+  maxToolOutputLength: 8_000,
+  toolOutputTruncate: 'tail',
+}
+
 export class ContextManager {
   private config: ContextConfig
 
@@ -142,10 +150,10 @@ export class ContextManager {
     return messages.map((msg) => {
       if (msg.role === 'tool') {
         // Truncate tool results to essential info
-        return {
-          ...msg,
-          content: this.truncateToolOutput(msg.content),
-        }
+        const truncated = this.truncateToolOutput(
+          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+        )
+        return { role: 'user' as const, content: `[Tool Output]: ${truncated}` }
       }
       return msg
     })

@@ -25,25 +25,21 @@ import type {
 // ─── Agent Class ───────────────────────────────────────────────────
 
 export class Agent {
-  // Core components
   private registry: ToolRegistry
   private engine: ToolEngine
   private guard: PermissionGuard
   private router: ProviderRouter
   private contextMgr: ContextManager
 
-  // Config
   private systemPrompt: string
   private workingDir: string
   private permissions: PermissionConfig
   private limits: ResourceLimits
   private contextConfig: ContextConfig
 
-  // State
   private state: AgentState
   private messages: CoreMessage[] = []
 
-  // Hooks & Events
   private hooks: Map<HookName, HookFn[]> = new Map()
   private eventHandlers: Map<AgentEventName, EventHandler[]> = new Map()
   private steps: StepInfo[] = []
@@ -86,17 +82,13 @@ export class Agent {
       messages: [],
     }
 
-    // Build initial system message
-    this.messages = [
-      { role: 'system', content: this.systemPrompt },
-    ]
+    this.messages = [{ role: 'system', content: this.systemPrompt }]
   }
 
   // ─── Public API ──────────────────────────────────────────────────
 
-  /** Run the agent with a user prompt */
   async run(prompt: string, options?: AgentRunOptions): Promise<AgentResult> {
-    // Reset state for new run
+    // Reset state
     this.state = {
       step: 0,
       totalTokensUsed: 0,
@@ -107,14 +99,9 @@ export class Agent {
       messages: [{ role: 'system', content: this.systemPrompt }],
     }
     this.steps = []
-
-    // Add user message
     this.messages.push({ role: 'user', content: prompt })
 
-    // Fire start event
     this.emit('agent:start', { prompt })
-
-    // Hook: onStart
     await this.runHook('onStart', { agentState: this.state, step: 0 })
 
     const maxSteps = options?.maxSteps ?? this.limits.maxSteps
@@ -122,9 +109,7 @@ export class Agent {
     const runStart = Date.now()
 
     try {
-      // Main ReAct loop
       while (this.state.step < maxSteps) {
-        // Check abort
         if (signal?.aborted || this.state.aborted) {
           this.state.aborted = true
           break
@@ -145,12 +130,11 @@ export class Agent {
         const aiTools = this.buildAITools()
 
         // Hook: onBeforeLLMCall
-        const hookCtx: HookContext = {
+        await this.runHook('onBeforeLLMCall', {
           agentState: this.state,
           step: this.state.step,
           messages: this.messages,
-        }
-        const hookResult = await this.runHook('onBeforeLLMCall', hookCtx)
+        })
 
         // Call LLM
         this.emit('llm:call', { step: this.state.step, messageCount: this.messages.length })
@@ -160,20 +144,17 @@ export class Agent {
         const result = await generateText({
           model: provider.model,
           system: this.systemPrompt,
-          messages: this.messages.slice(1), // exclude system, AI SDK handles it
+          messages: this.messages.slice(1),
           tools: aiTools,
-          maxToolRoundtrips: 1,  // We control the loop ourselves
           abortSignal: signal,
         })
 
         const stepDuration = Date.now() - stepStart
 
-        // Track tokens
         if (result.usage) {
           this.state.totalTokensUsed += result.usage.totalTokens ?? 0
         }
 
-        // Hook: onAfterLLMCall
         await this.runHook('onAfterLLMCall', {
           agentState: this.state,
           step: this.state.step,
@@ -182,21 +163,12 @@ export class Agent {
 
         this.emit('llm:response', { step: this.state.step, tokensUsed: result.usage?.totalTokens })
 
-        // Record step
         const stepInfo: StepInfo = {
           step: this.state.step,
           text: result.text || undefined,
-          toolCalls: result.toolCalls?.map(tc => ({ tool: tc.toolName, args: tc.args as Record<string, unknown> })),
-          toolResults: result.toolResults?.map(tr => ({
-            tool: tr.toolName,
-            output: tr.result,
-            durationMs: 0,
-            approved: true,
-          })),
           durationMs: stepDuration,
         }
 
-        // Stream text if callback provided
         if (result.text && options?.onText) {
           options.onText(result.text)
         }
@@ -204,6 +176,11 @@ export class Agent {
         // Handle tool calls
         if (result.toolCalls && result.toolCalls.length > 0) {
           const toolResults: ToolResult[] = []
+
+          stepInfo.toolCalls = result.toolCalls.map(tc => ({
+            tool: tc.toolName,
+            args: tc.args as Record<string, unknown>,
+          }))
 
           for (const toolCall of result.toolCalls) {
             const call: ToolCall = {
@@ -216,7 +193,7 @@ export class Agent {
             const approvalRequest: ApprovalRequest = {
               tool: toolCall.toolName,
               args: call.args,
-              permission: toolDef?.permission ?? { level: 'dangerous' },
+              permission: toolDef?.permission ?? { level: 'dangerous' as const },
             }
 
             const approval = await this.guard.check(approvalRequest)
@@ -266,16 +243,13 @@ export class Agent {
 
             const toolResult = await this.engine.execute(call, toolCtx)
 
-            // Truncate output if needed
             if (toolResult.output) {
               toolResult.output = this.contextMgr.truncateToolOutput(toolResult.output)
             }
 
             toolResults.push(toolResult)
-
             this.emit('tool:result', { tool: toolCall.toolName, result: toolResult })
 
-            // Hook: onAfterToolCall
             await this.runHook('onAfterToolCall', {
               agentState: this.state,
               step: this.state.step,
@@ -286,21 +260,17 @@ export class Agent {
 
           stepInfo.toolResults = toolResults
 
-          // Add assistant message with tool calls + tool results to history
-          this.messages.push({
-            role: 'assistant',
-            content: result.text ?? '',
-          })
+          // Add assistant + tool messages to history
+          this.messages.push({ role: 'assistant', content: result.text ?? '' })
 
-          // Add tool results as tool messages
           for (const tr of toolResults) {
+            // Use user message as a workaround for tool result injection
             this.messages.push({
-              role: 'tool',
-              content: JSON.stringify(tr.error ? { error: tr.error } : tr.output),
+              role: 'user',
+              content: `[Tool: ${tr.tool}] ${tr.error ? `Error: ${tr.error}` : JSON.stringify(tr.output)}`,
             } as CoreMessage)
           }
         } else {
-          // No tool calls — add assistant message
           if (result.text) {
             this.messages.push({ role: 'assistant', content: result.text })
           }
@@ -309,20 +279,18 @@ export class Agent {
         this.steps.push(stepInfo)
         this.state.step++
 
-        // Step callback
         if (options?.onStep) {
           options.onStep(stepInfo)
         }
 
         this.emit('step', { step: this.state.step })
 
-        // If no tool calls and we have text, the agent is done
+        // No tool calls + text = agent is done
         if (!result.toolCalls?.length && result.text) {
           break
         }
       }
 
-      // Build final result
       const finalText = this.extractFinalText()
       const agentResult: AgentResult = {
         text: finalText,
@@ -332,77 +300,56 @@ export class Agent {
         totalDurationMs: Date.now() - runStart,
       }
 
-      // Hook: onEnd
-      await this.runHook('onEnd', {
-        agentState: this.state,
-        step: this.state.step,
-      })
-
+      await this.runHook('onEnd', { agentState: this.state, step: this.state.step })
       this.emit('agent:end', { steps: this.state.step, durationMs: agentResult.totalDurationMs })
 
       return agentResult
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
-      
       this.emit('agent:error', { error: error.message, step: this.state.step })
-
-      await this.runHook('onError', {
-        agentState: this.state,
-        step: this.state.step,
-      })
-
+      await this.runHook('onError', { agentState: this.state, step: this.state.step })
       throw error
     }
   }
 
-  /** Register a tool after creation */
   registerTool(tool: ToolDefinition): void {
     this.registry.register(tool)
   }
 
-  /** Register a lifecycle hook */
   hook(name: HookName, fn: HookFn): void {
-    if (!this.hooks.has(name)) {
-      this.hooks.set(name, [])
-    }
+    if (!this.hooks.has(name)) this.hooks.set(name, [])
     this.hooks.get(name)!.push(fn)
   }
 
-  /** Subscribe to an event */
   on(event: AgentEventName, handler: EventHandler): void {
-    if (!this.eventHandlers.has(event)) {
-      this.eventHandlers.set(event, [])
-    }
+    if (!this.eventHandlers.has(event)) this.eventHandlers.set(event, [])
     this.eventHandlers.get(event)!.push(handler)
   }
 
-  /** Get current state snapshot */
   getState(): Readonly<AgentState> {
     return { ...this.state }
   }
 
   // ─── Private ─────────────────────────────────────────────────────
 
-  /** Build Vercel AI SDK compatible tools map */
   private buildAITools(): Record<string, Tool> {
     const tools: Record<string, Tool> = {}
     for (const toolDef of this.registry.getAll()) {
       tools[toolDef.name] = {
         description: toolDef.description,
-        parameters: toolDef.parameters as z.ZodType,
-        execute: async (args: unknown) => {
-          // Actual execution is handled by our engine in the loop
-          return args
-        },
+        parameters: toolDef.parameters as z.ZodTypeAny,
+        execute: async (args: unknown) => args,
       }
     }
     return tools
   }
 
-  /** Run all hooks for a given name */
-  private async runHook(name: HookName, ctx: HookContext): Promise<void | { action?: 'deny'; reason?: string }> {
+  private async runHook(
+    name: HookName,
+    ctx: HookContext,
+  ): Promise<void | { action?: 'deny'; reason?: string }> {
     const fns = this.hooks.get(name) ?? []
-    let result: void | { action?: 'deny'; reason?: string }
+    let result: void | { action?: 'deny'; reason?: string } | undefined
     for (const fn of fns) {
       result = await fn(ctx)
       if (result?.action === 'deny') return result
@@ -410,16 +357,14 @@ export class Agent {
     return result
   }
 
-  /** Emit an event to all subscribers */
   private emit(type: AgentEventName, data: Record<string, unknown>): void {
     const event: AgentEvent = { type, timestamp: Date.now(), data }
     const handlers = this.eventHandlers.get(type) ?? []
     for (const handler of handlers) {
-      try { handler(event) } catch { /* swallow handler errors */ }
+      try { handler(event) } catch { /* swallow */ }
     }
   }
 
-  /** Get a state snapshot for tool context */
   private getSnapshot() {
     return {
       step: this.state.step,
@@ -428,7 +373,6 @@ export class Agent {
     }
   }
 
-  /** Extract the final text response from messages */
   private extractFinalText(): string {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       if (this.messages[i].role === 'assistant') {

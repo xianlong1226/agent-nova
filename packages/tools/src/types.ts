@@ -1,21 +1,14 @@
 import { z } from 'zod'
 
-// ─── Permission Levels ─────────────────────────────────────────────
+// ─── Self-contained types (no cross-package deps for zero-coupling) ─
 
 export type PermissionLevel = 'read' | 'write' | 'dangerous'
 
 export interface ToolPermission {
-  /** Permission level of this tool */
   level: PermissionLevel
-  /** Optional scope restrictions (e.g. path patterns, command patterns) */
   scope?: string[]
-  /** Human-readable description of what this permission entails */
   description?: string
 }
-
-// ─── Tool Context ──────────────────────────────────────────────────
-
-export type ApprovalResult = 'allow-once' | 'allow-always' | 'deny'
 
 export interface ApprovalRequest {
   tool: string
@@ -24,20 +17,11 @@ export interface ApprovalRequest {
   reason?: string
 }
 
+export type ApprovalResult = 'allow-once' | 'allow-always' | 'deny'
+
 export type ApprovalFn = (request: ApprovalRequest) => Promise<ApprovalResult>
 
-export interface ToolContext {
-  /** Current agent state (read-only snapshot) */
-  agentState: Readonly<AgentStateSnapshot>
-  /** Working directory for this agent */
-  workingDir: string
-  /** Abort signal for cancellation */
-  abortSignal: AbortSignal
-  /** Request human approval for this tool call */
-  askApproval: ApprovalFn
-  /** Structured logger */
-  logger: ToolLogger
-}
+// ─── Tool Context ──────────────────────────────────────────────────
 
 export interface AgentStateSnapshot {
   step: number
@@ -51,18 +35,21 @@ export interface ToolLogger {
   error(message: string, data?: Record<string, unknown>): void
 }
 
+export interface ToolContext {
+  agentState: Readonly<AgentStateSnapshot>
+  workingDir: string
+  abortSignal: AbortSignal
+  askApproval: ApprovalFn
+  logger: ToolLogger
+}
+
 // ─── Tool Definition ───────────────────────────────────────────────
 
-export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
-  /** Unique tool name, namespaced with dot notation (e.g. 'fs.readFile') */
+export interface ToolDefinition<TInput = any, TOutput = any> {
   name: string
-  /** Description for the LLM to understand when to use this tool */
   description: string
-  /** Zod schema for input validation */
-  parameters: z.ZodType<TInput>
-  /** Permission declaration */
+  parameters: z.ZodTypeAny
   permission: ToolPermission
-  /** Execute the tool */
   execute: (input: TInput, ctx: ToolContext) => Promise<TOutput>
 }
 
@@ -81,9 +68,9 @@ export interface ToolResult {
   approved: boolean
 }
 
-// ─── Helper: defineTool ────────────────────────────────────────────
+// ─── Helper ────────────────────────────────────────────────────────
 
-export function defineTool<TInput, TOutput>(
+export function defineTool<TInput = any, TOutput = any>(
   def: ToolDefinition<TInput, TOutput>
 ): ToolDefinition<TInput, TOutput> {
   return def

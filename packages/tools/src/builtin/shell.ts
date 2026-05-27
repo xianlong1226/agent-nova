@@ -1,14 +1,15 @@
 import { z } from 'zod'
-import { defineTool } from './types.js'
+import { defineTool } from '../types.js'
 import { exec } from 'child_process'
 import { resolve } from 'path'
+import type { ToolContext } from '../types.js'
 
 // ─── shell.exec ────────────────────────────────────────────────────
 
 export const shellExec = defineTool({
   name: 'shell.exec',
   description:
-    'Execute a shell command and return its stdout, stderr, and exit code. Use with caution — this is a dangerous operation.',
+    'Execute a shell command and return its stdout, stderr, and exit code.',
   parameters: z.object({
     command: z.string().describe('Shell command to execute'),
     cwd: z.string().optional().describe('Working directory for the command'),
@@ -19,22 +20,22 @@ export const shellExec = defineTool({
     scope: ['*'],
     description: 'Execute arbitrary shell commands',
   },
-  execute: async ({ command, cwd, timeout }, ctx) => {
-    const resolvedCwd = cwd ? resolve(ctx.workingDir, cwd) : ctx.workingDir
-    ctx.logger.info('Executing command', { command, cwd: resolvedCwd })
+  execute: async (input: { command: string; cwd?: string; timeout: number }, ctx: ToolContext) => {
+    const resolvedCwd = input.cwd ? resolve(ctx.workingDir, input.cwd) : ctx.workingDir
+    ctx.logger.info('Executing command', { command: input.command, cwd: resolvedCwd })
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const child = exec(
-        command,
+        input.command,
         {
           cwd: resolvedCwd,
-          timeout,
-          maxBuffer: 10 * 1024 * 1024, // 10MB
+          timeout: input.timeout,
+          maxBuffer: 10 * 1024 * 1024,
           shell: '/bin/bash',
         },
         (error, stdout, stderr) => {
           resolve({
-            stdout: stdout?.slice(0, 50_000) ?? '',   // Truncate large output
+            stdout: stdout?.slice(0, 50_000) ?? '',
             stderr: stderr?.slice(0, 10_000) ?? '',
             exitCode: error ? (error as NodeJS.ErrnoException).code ?? 1 : 0,
             signal: error?.signal ?? null,
@@ -42,7 +43,6 @@ export const shellExec = defineTool({
         }
       )
 
-      // Forward abort signal
       ctx.abortSignal.addEventListener('abort', () => {
         child.kill('SIGTERM')
       }, { once: true })

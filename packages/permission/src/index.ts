@@ -5,6 +5,11 @@ export {
 } from './guard.js'
 
 export type {
+  PermissionLevel,
+  ToolPermission,
+  ApprovalRequest,
+  ApprovalResult,
+  ApprovalFn,
   PermissionMode,
   PermissionRule,
   PermissionConfig,

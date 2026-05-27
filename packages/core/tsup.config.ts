@@ -6,4 +6,5 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
+  external: ['ai', '@ai-sdk/openai', '@ai-sdk/anthropic'],
 })

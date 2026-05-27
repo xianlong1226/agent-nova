@@ -1,19 +1,18 @@
 import { describe, it, expect } from 'vitest'
 import { PermissionGuard, DEFAULT_PERMISSION_CONFIG } from '../src/guard.js'
-import type { ApprovalRequest, PermissionMode, PermissionRule } from '../src/guard.js'
-import type { PermissionLevel, ToolPermission } from '@agentnova/tools'
+import type { ApprovalRequest } from '../src/guard.js'
 
 describe('PermissionGuard', () => {
-  const readPerm: ToolPermission = { level: 'read' }
-  const writePerm: ToolPermission = { level: 'write' }
-  const dangerousPerm: ToolPermission = { level: 'dangerous' }
+  const readPerm = { level: 'read' as const }
+  const writePerm = { level: 'write' as const }
+  const dangerousPerm = { level: 'dangerous' as const }
 
   it('should respect explicit rules over level defaults', () => {
     const guard = new PermissionGuard({
       ...DEFAULT_PERMISSION_CONFIG,
       rules: [
         { tool: 'fs.readFile', mode: 'allow' },
-        { tool: 'shell.exec', mode: ' deny' },
+        { tool: 'shell.exec', mode: 'deny' },
       ],
     })
 
@@ -31,7 +30,7 @@ describe('PermissionGuard', () => {
     expect(guard.getEffectiveMode('some.dangerous.tool', 'dangerous')).toBe('ask')
   })
 
-  it('should auto-allow in "allow" mode', async () => {
+  it('should auto-allow in "allow" mode when no explicit rule', async () => {
     const guard = new PermissionGuard({
       mode: 'allow',
       rules: [],
@@ -48,21 +47,28 @@ describe('PermissionGuard', () => {
     expect(result).toBe('allow-once')
   })
 
-  it('should auto-deny in "deny" mode', async () => {
+  it('should auto-deny in "deny" mode when no explicit rule', async () => {
     const guard = new PermissionGuard({
       mode: 'deny',
-      rules: [],
+      rules: [{ tool: 'fs.readFile', mode: 'allow' }],  // explicit allow overrides
       limits: DEFAULT_PERMISSION_CONFIG.limits,
     })
 
-    const request: ApprovalRequest = {
+    // explicit allow → allow-once
+    const allowReq: ApprovalRequest = {
       tool: 'fs.readFile',
       args: { path: '/etc/passwd' },
       permission: readPerm,
     }
+    expect(await guard.check(allowReq)).toBe('allow-once')
 
-    const result = await guard.check(request)
-    expect(result).toBe('deny')
+    // no rule + global deny → deny
+    const denyReq: ApprovalRequest = {
+      tool: 'shell.exec',
+      args: { command: 'ls' },
+      permission: dangerousPerm,
+    }
+    expect(await guard.check(denyReq)).toBe('deny')
   })
 
   it('should call approval callback in "ask" mode', async () => {
@@ -70,7 +76,7 @@ describe('PermissionGuard', () => {
       mode: 'ask',
       rules: [{ tool: 'fs.readFile', mode: 'ask' }],
       limits: DEFAULT_PERMISSION_CONFIG.limits,
-      onApprovalNeeded: async () => 'allow-always',
+      onApprovalNeeded: async () => 'allow-always' as const,
     })
 
     const request: ApprovalRequest = {
@@ -88,7 +94,6 @@ describe('PermissionGuard', () => {
       mode: 'ask',
       rules: [],
       limits: DEFAULT_PERMISSION_CONFIG.limits,
-      // No onApprovalNeeded
     })
 
     const request: ApprovalRequest = {
@@ -104,9 +109,7 @@ describe('PermissionGuard', () => {
   it('should match wildcard patterns', () => {
     const guard = new PermissionGuard({
       ...DEFAULT_PERMISSION_CONFIG,
-      rules: [
-        { tool: 'fs.*', mode: 'allow' },
-      ],
+      rules: [{ tool: 'fs.*', mode: 'allow' }],
     })
 
     expect(guard.getEffectiveMode('fs.readFile', 'read')).toBe('allow')
