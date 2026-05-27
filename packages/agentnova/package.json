@@ -1,0 +1,38 @@
+{
+  "name": "agentnova",
+  "version": "0.1.0",
+  "description": "AgentNova — Universal Agent SDK",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "agentnova": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@agentnova/core": "workspace:*",
+    "@agentnova/tools": "workspace:*",
+    "@agentnova/permission": "workspace:*",
+    "@agentnova/memory": "workspace:*",
+    "@agentnova/skills": "workspace:*",
+    "@agentnova/providers": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "agentnova-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "clean": "turbo run clean"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0",
+    "tsup": "^8.4.0",
+    "@types/node": "^22.0.0"
+  },
+  "packageManager": "pnpm@9.15.0"
+}
