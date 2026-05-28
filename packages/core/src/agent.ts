@@ -471,7 +471,8 @@ export class Agent {
         }
 
         // Collect tool info from steps
-        const stepsData = (consumed as any).steps
+        // NOTE: streamText 返回的 steps / response / toolCalls 均为 Promise（与 generateText 同名同实不同异），必须 await
+        const stepsData = await (consumed as any).steps
         if (stepsData?.length) {
           for (const sdkStep of stepsData) {
             if (sdkStep.toolCalls?.length) {
@@ -490,7 +491,7 @@ export class Agent {
         }
 
         // Sync messages: append newly generated messages from SDK to preserve history
-        const responseMsgs = (consumed as any).response?.messages
+        const responseMsgs = (await (consumed as any).response)?.messages
         if (responseMsgs?.length) {
           this.messages = [...this.messages, ...normalizeAssistantMessages(responseMsgs)]
           if (this.memoryMessageIdx >= 0) {
@@ -507,7 +508,7 @@ export class Agent {
         this.emit('step', { step: this.state.step })
 
         const hasToolCalls = stepsData?.some((s: any) => s.toolCalls?.length)
-          ?? ((consumed as any).toolCalls?.length > 0)
+          ?? ((await (consumed as any).toolCalls)?.length > 0)
         return !!hasToolCalls
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))
