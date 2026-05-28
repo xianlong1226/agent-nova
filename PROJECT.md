@@ -1,229 +1,234 @@
-# AgentNova SDK 🔮
+# AgentNova 项目维护指南
 
-> 通用 Agent 开发框架 —— 从原型到生产，一套代码搞定
+> 面向贡献者与维护者：仓库结构、开发流程、调试方法。
+>
+> 想要使用 SDK 请看 [README.md](./README.md)；深度架构请看 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
-## 一句话简介
+## 项目概述
 
-AgentNova 是一个 TypeScript Agent 开发框架，提供上下文管理、记忆系统、工具执行、权限控制、Provider 路由的全链路解决方案。你在 10 行代码里创建的 Agent，和你上线后跑在生产环境的 Agent，是同一个。
+AgentNova 是 TypeScript 原生的 Agent 开发框架，按职责拆分为 7 个 workspace 包，使用 pnpm + Turbo 管理 monorepo，tsup 产出 ESM + CJS + DTS 三套构建产物，Vitest 做测试。
 
----
-
-## 核心能力
-
-| 能力 | 说明 |
-|------|------|
-| **ReAct 主循环** | 多步推理 + 工具调用，直到任务完成或触发资源限制 |
-| **智能上下文压缩** | 不是粗暴丢消息，而是 LLM 自动摘要 + 代词消解 + 语义优先级排序 |
-| **三层记忆** | Working（会话内）→ Project（跨会话文件）→ LongTerm（SQLite + 重要性衰减） |
-| **权限沙箱** | read/write/dangerous 三级 + 命令黑名单正则 + 路径白名单 + 审批回调 |
-| **Provider 降级链** | 主 Provider 失败自动切换 fallback，429 自适应退避 |
-| **并发安全** | 同一用户串行排队，不同用户完全并行，会话物理隔离 |
-| **全链路追踪** | Trace 收集 → NDJSON 日志 + 文件轮转 → Trace Replay 回放 |
-| **结构化错误** | 30+ 错误码 + 自动推理 + 重试策略映射，不再靠字符串匹配 |
-
----
-
-## 项目结构
+## 仓库结构
 
 ```
-agent-sdk/
-├── packages/
-│   ├── core/          # Agent 核心：主循环、上下文、状态、追踪、错误
-│   ├── tools/         # 工具系统：注册、执行、内置 fs/shell 工具
-│   ├── permission/    # 权限系统：沙箱、降级链、审批回调
-│   ├── memory/        # 记忆系统：三层记忆 + 重要性衰减 + 主动淘汰
-│   ├── providers/     # Provider 路由：降级链 + 流控限流
-│   ├── skills/        # 技能系统：加载、注册、市场、发布
-│   └── agentnova/     # 统一入口：重新导出 + CLI + quickAgent 快捷创建
+agent-nova/
+├── packages/                # 7 个 workspace 包（见下文「包职责」）
+│   ├── core/                # Agent 核心：主循环、上下文、追踪
+│   ├── tools/               # 工具注册与执行
+│   ├── permission/          # 权限沙箱与审批
+│   ├── memory/              # 三层记忆（sql.js）
+│   ├── providers/           # Provider 路由与流控
+│   ├── skills/              # 技能加载与发布
+│   └── agentnova/           # 统一入口 + CLI
+├── examples/                # 6 个可独立运行的示例（独立 workspace）
+├── skills/                  # 内置 / 示例技能（code-review, git-ops）
 ├── docs/
-│   ├── API.md         # 接口参考手册（7 模块）
-│   └── GUIDE.md       # 13 章使用教程
-├── PROJECT.md         # 本文档
-└── README.md
+│   ├── API.md               # API 参考
+│   └── GUIDE.md             # 使用教程
+├── ARCHITECTURE.md          # 架构设计（深度）
+├── PROJECT.md               # 本文档
+├── README.md                # 使用者入口
+├── package.json             # 根 workspace 配置
+├── pnpm-workspace.yaml      # workspace 范围：packages/* + examples/*
+├── turbo.json               # turbo 任务编排
+└── tsconfig.base.json       # TS 共享基础配置
 ```
 
----
+## 包职责
 
-## 模块详解
+| 包名 | 职责 | 主要导出 |
+|------|------|---------|
+| [@agentnova/core](./packages/core) | Agent 主循环、上下文管理、会话、追踪、错误体系 | `Agent`、`ContextManager`、`SessionManager`、`UsageTracker`、`TraceCollector`、`StructuredLogger`、`AgentError` |
+| [@agentnova/tools](./packages/tools) | 工具注册、执行引擎、内置 fs/shell 工具 | `ToolRegistry`、`ToolEngine`、`defineTool`、`fsTools`、`shellTools` |
+| [@agentnova/permission](./packages/permission) | 权限决策、沙箱、命令黑名单、审批回调 | `PermissionGuard`、规则与沙箱类型 |
+| [@agentnova/memory](./packages/memory) | 三层记忆 + 语义注入 + 重要性衰减 | `WorkingMemory`、`ProjectMemory`、`LongTermMemory`、`MemoryInjector` |
+| [@agentnova/providers](./packages/providers) | Provider 路由、降级链、限流 | `createRouter`、`createOpenAICompatibleProvider`、`RateLimiter`、`ProviderRouter` |
+| [@agentnova/skills](./packages/skills) | 技能加载、注册、运行时激活、发布 | `SkillLoader`、`SkillRegistry`、`SkillLoaderWorker` |
+| [agentnova](./packages/agentnova) | 统一入口（重新导出所有子包）+ CLI + `quickAgent` | `Agent`、`quickAgent`、`createRouter`、CLI 二进制 |
 
-### @agentnova/core（2,476 行 / 869 行测试）
+各模块的内部架构与设计决策见 [ARCHITECTURE.md](./ARCHITECTURE.md) 第二～十章。
 
-Agent 的心脏。包含：
+## 依赖关系
 
-- **Agent 类**：ReAct 主循环，管理 `run()` / `runStream()` 两套执行路径
-- **ContextManager**：token 预算感知的上下文压缩，支持 LLM 自动摘要
-- **SessionManager**：并发锁 + 用户数据隔离 + JSON 文件持久化
-- **UsageTracker**：精确成本追踪，支持 6 个 Provider 的定价数据
-- **TraceCollector + TraceReplay**：全链路追踪和回放
-- **StructuredLogger**：文件输出 + 轮转 + 采样率配置
-- **AgentError**：30+ 结构化错误码 + 自动推理 + 重试策略
-
-### @agentnova/tools（408 行 / 97 行测试）
-
-工具注册与执行引擎：
-
-- **ToolRegistry**：注册、查找、列举工具
-- **ToolEngine**：执行工具调用，处理超时和错误
-- **内置工具**：`fs.readFile`、`fs.writeFile`、`fs.listDir`、`fs.stat`、`shell.exec`
-- **defineTool**：工具定义辅助函数，带 Zod 参数校验
-
-### @agentnova/permission（286 行 / 255 行测试）
-
-安全第一的权限系统：
-
-- **PermissionGuard**：权限决策引擎，支持 allow/ask/deny 三种模式
-- **沙箱配置**：路径白名单、命令黑名单（精确 + 正则）、文件大小限制
-- **审批回调**：`askApproval(request) → allow-once | allow-always | deny`
-- **always-allowed 缓存**：用户选择"总是允许"后自动跳过审批
-- **默认规则**：读操作自动放行，写操作和命令执行需要审批
-
-### @agentnova/memory（655 行 / 245 行测试）
-
-三层记忆 + 智能衰减：
-
-- **WorkingMemory**：内存中的 KV 存储，会话结束即消失
-- **ProjectMemory**：基于 `AGENT.md` 文件的持久化记忆，跨会话保留
-- **LongTermMemory**：SQLite（sql.js / 纯 WASM）持久化 + 语义搜索
-- **MemoryInjector**：预算感知的记忆注入，窗口紧张时自动缩减注入量
-- **重要性系统**：4 级（critical/high/normal/low）+ 半衰期衰减 + 自动分类
-- **主动淘汰**：低于阈值的记忆自动清理
-
-### @agentnova/providers（462 行 / 流控模块）
-
-Provider 路由 + 流控：
-
-- **ProviderRouter**：默认 Provider + 任务复杂度路由 + 降级链
-- **RateLimiter**：令牌桶算法，全局 + 按 Provider 独立限流
-- **自适应退避**：收到 429 自动加 backoff，成功后清除
-- **预设 Provider**：GPT-4o、DeepSeek、Qwen、Claude Sonnet 4、Claude Haiku 3.5
-
-### @agentnova/skills（466 行 / 8 行测试）
-
-技能系统：
-
-- **SkillLoader**：从目录加载技能（skill.config.json + SKILL.md + tools + knowledge）
-- **SkillRegistry**：安装/卸载/搜索/发布技能
-- **SkillLoaderWorker**：运行时技能激活（根据输入自动启用相关技能）
-- **发布功能**：Git push 或 npm publish，支持 dry-run
-
-### agentnova（687 行 / 13 行测试）
-
-统一入口 + CLI：
-
-- **重新导出**：所有子包的公共 API 一站式导入
-- **quickAgent**：10 行代码创建带 fs + shell 内置工具的 Agent
-- **CLI**：`create` 脚手架、`add-tool`/`add-skill` 模板生成、`run` 执行、`skill` 管理
-
----
-
-## 快速开始
-
-### 安装
-
-```bash
-pnpm add agentnova ai @ai-sdk/openai zod
+```
+agentnova ──→ core ──→ tools / permission / memory / providers / skills
+              │
+              └──→ (Vercel AI SDK: ai + @ai-sdk/*)
 ```
 
-### 10 行创建 Agent
-
-```typescript
-import { quickAgent } from 'agentnova'
-import { createOpenAI } from '@ai-sdk/openai'
-
-const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
-
-const agent = quickAgent({
-  model: 'openai-gpt4o',
-  router: createRouter(
-    [{ id: 'openai-gpt4o', model: openai('gpt-4o') }],
-    'openai-gpt4o',
-  ),
-  systemPrompt: '你是一个智能助手',
-})
-
-const result = await agent.run('当前目录有哪些文件？')
-console.log(result.text)
-```
-
-### CLI 脚手架
-
-```bash
-# 创建项目
-npx agentnova create my-agent
-cd my-agent
-pnpm install
-
-# 添加自定义工具
-npx agentnova add-tool slack.notify
-
-# 添加技能
-npx agentnova add-skill code-review
-
-# 运行
-pnpm dev "帮我看看有哪些文件"
-```
-
----
-
-## 设计哲学
-
-1. **渐进式复杂度**：`quickAgent` → `createAgent` → 深度配置，每一步都能跑
-2. **零惊吓默认值**：权限默认 `ask` 模式，不会悄悄执行危险操作
-3. **中文友好**：token 估算对 CJK 做了特殊处理，不会低估中文消耗
-4. **生产就绪**：结构化错误、全链路追踪、文件日志轮转——不是为了秀技术，是为了半夜被叫醒时能看到为什么挂了
-5. **部署无障碍**：sql.js 替代 better-sqlite3，Docker / ARM / Serverless 全兼容
-
----
+子包之间零循环依赖，每个子包自包含类型定义，对外暴露最小接口。
 
 ## 技术栈
 
 | 层面 | 选型 |
 |------|------|
-| 语言 | TypeScript 5.8+ (strict) |
+| 语言 | TypeScript 5.8+（strict） |
 | 运行时 | Node.js 22+ |
-| LLM SDK | Vercel AI SDK (`ai` + `@ai-sdk/*`) |
+| LLM SDK | Vercel AI SDK（`ai` + `@ai-sdk/*`） |
 | 参数校验 | Zod |
-| 构建 | tsup (ESM + CJS + DTS) |
+| 构建 | tsup（ESM + CJS + DTS） |
 | 包管理 | pnpm workspaces |
-| 持久化 | sql.js (WASM SQLite) + JSON 文件 |
+| 任务编排 | Turbo |
+| 持久化 | sql.js（WASM SQLite）+ JSON 文件 |
 | 测试 | Vitest |
 
----
+## 环境要求与初始化
 
-## 测试覆盖
+```bash
+# Node 22+ / pnpm 9+
+node -v
+pnpm -v
 
-| 模块 | 测试数 | 状态 |
-|------|--------|------|
-| @agentnova/core | 48 | ✅ |
-| @agentnova/permission | 13 | ✅ |
-| @agentnova/memory | 22 | ✅ |
-| @agentnova/tools | 7 | ✅ |
-| @agentnova/providers | 1 | ✅ |
-| @agentnova/skills | 1 | ✅ |
-| agentnova | 1 | ✅ |
-| **合计** | **93** | ✅ |
+# 安装依赖（含 examples）
+pnpm install
 
-### Agent 主循环集成测试（核心心脏）
+# 全量构建
+pnpm build
+```
 
-| 测试 | 验证点 |
-|------|--------|
-| 正常单步结束 | text/steps/usage 正确 |
-| 多步工具调用 | 2 steps、toolCalls 拼接 |
-| Provider 降级 | 主失败→fallback 自动切换 |
-| 上下文压缩触发 | 小窗口不崩，压缩后正常 |
-| 资源限制终止 | maxSteps=3 精确停止 |
-| AbortSignal 取消 | 50ms cancel 平滑停止 |
-| 钩子拦截 | onBeforeToolCall deny 不崩 |
-| 错误恢复 | 工具失败后 Agent 继续运行 |
-| 会话隔离 | 连续 run() 无残留 |
+## 常用命令
 
----
+| 命令 | 行为 | 备注 |
+|------|------|------|
+| `pnpm build` | `turbo run build` | 拓扑构建所有包，产物落到各包 `dist/` |
+| `pnpm dev` | `turbo run dev` | 持久化 watch（`persistent: true`），上游构建完成后启动 |
+| `pnpm test` | `turbo run test` | 依赖 `build`，跑各包 `vitest run` |
+| `pnpm lint` | `turbo run lint` | |
+| `pnpm clean` | `turbo run clean` | 清理 `dist/` |
 
-## 版本
+`turbo.json` 中关键约定：
 
-**v0.1.0** — MVP 完成，生产级基础设施到位
+- `build.dependsOn: ["^build"]` —— 拓扑顺序构建，下游包必须等上游就绪
+- `dev` 不缓存且 `persistent`，确保 watch 模式不被 Turbo 提前结束
+- `test.dependsOn: ["build"]` —— 测试先确保产物存在
 
----
+## 包级开发
+
+单包开发更快：
+
+```bash
+cd packages/core
+pnpm build       # 一次构建
+pnpm dev         # tsup --watch
+pnpm test        # vitest run
+pnpm clean       # rm -rf dist
+```
+
+每个包都遵循相同的清单：
+
+- `package.json` 中导出 `dist/index.js` (ESM) / `dist/index.cjs` (CJS) / `dist/index.d.ts`
+- `tsup.config.ts` 中 `format: ['esm', 'cjs']` + `dts: true`，外部依赖（如 `ai`）放进 `external`
+- `tsconfig.json` 继承 `tsconfig.base.json`
+- `test/` 目录放 Vitest 测试文件
+
+新增包时记得：
+
+1. 加入 `pnpm-workspace.yaml`（已通配 `packages/*`）
+2. 在依赖它的包 `package.json` 中以 `workspace:*` 引用
+3. 如果有非默认任务，需要在 `turbo.json` 加入对应 pipeline
+
+## examples 工作流
+
+`examples/` 是 monorepo 的一部分（见 [pnpm-workspace.yaml](./pnpm-workspace.yaml)），通过 `workspace:*` 引用 `agentnova`：
+
+```jsonc
+// examples/01-basic/package.json
+{
+  "dependencies": { "agentnova": "workspace:*" }
+}
+```
+
+工作流要点：
+
+- **首次运行前必须 `pnpm build`**：examples 直接 import 从子包 `dist/` 出来的产物
+- 修改 `packages/` 后，要么再 `pnpm build`，要么开 `pnpm dev` 让 tsup 持续 watch
+- 运行示例：
+
+  ```bash
+  cd examples/01-basic
+  LLM_BASE_URL=https://api.deepseek.com/v1 \
+  LLM_API_KEY=sk-xxx \
+  LLM_MODEL=deepseek-chat \
+    pnpm start
+  ```
+
+## 调试方法
+
+### VS Code 调试
+
+仓库自带 [.vscode/launch.json](./.vscode/launch.json) 的 "Debug Current Example" 配置：
+
+1. 打开任意 `examples/*/index.ts`
+2. 在终端 `export DEEPSEEK_API_KEY=...`（或 `OPENAI_API_KEY` / `OPENAI_BASE_URL`）
+3. 按 `F5` 启动调试
+
+启动器会用 `node_modules/.bin/tsx --conditions node` 直接跑当前文件，断点、变量查看、调用栈都可用。
+
+### tsx 直跑
+
+```bash
+pnpm tsx examples/01-basic/index.ts
+pnpm tsx packages/agentnova/src/cli.ts run "你好"
+```
+
+### CLI 调试
+
+CLI 入口在 [packages/agentnova/src/cli.ts](./packages/agentnova/src/cli.ts)：
+
+```bash
+# 直接跑源码
+pnpm tsx packages/agentnova/src/cli.ts <args>
+
+# 链接到全局后用真实命令名调试
+cd packages/agentnova && pnpm link --global
+agentnova create my-agent
+```
+
+## 测试
+
+| 范围 | 命令 |
+|------|------|
+| 整库 | `pnpm test`（先 `build` 后 `vitest`） |
+| 单包 | `cd packages/<name> && pnpm test` |
+| 单文件 | `cd packages/<name> && pnpm vitest run test/some.test.ts` |
+
+测试目录约定：`packages/<name>/test/*.test.ts`。当前覆盖：
+
+| 模块 | 测试数 |
+|------|-------|
+| @agentnova/core | 48 |
+| @agentnova/permission | 13 |
+| @agentnova/memory | 22 |
+| @agentnova/tools | 7 |
+| @agentnova/providers | 1 |
+| @agentnova/skills | 1 |
+| agentnova | 1 |
+
+Agent 主循环集成测试覆盖：单步结束、多步工具调用、Provider 降级、上下文压缩、资源限制、AbortSignal 取消、钩子拦截、错误恢复、会话隔离。详见 [packages/core/test/](./packages/core/test/)。
+
+## 发布与版本
+
+当前版本：**v0.1.0**（MVP，生产级基础设施完整）。
+
+发布前 Checklist：
+
+1. `pnpm clean && pnpm install`
+2. `pnpm build` 必须全部通过
+3. `pnpm test` 全绿
+4. 同步更新各包 `package.json` 的 `version`
+5. 子包先发，根入口 `agentnova` 后发
+
+技能（Skill）发布渠道（Git / npm / dry-run）见 [ARCHITECTURE.md 第十章](./ARCHITECTURE.md)。
+
+## 常见维护问题
+
+| 问题 | 解决思路 |
+|------|---------|
+| `dev` watch 下首次构建报 DTS 错误 | tsup DTS 时序问题：先 `pnpm build` 一次让 `dist/` 就绪，再开 `dev` |
+| `.gitignore` 改了不生效 | 已被跟踪的文件需要 `git rm --cached <path>` 后再提交 |
+| 智谱 GLM 等 OpenAI 兼容端点报错 | `assistant.content` 不能为 `null`、`temperature` 不能为 `0`，已在 core 层做规范化 |
+| `pnpm install` 报版本不存在 | 检查根 / 子包 `package.json` 中的 `workspace:*` 是否拼写正确，必要时清掉 `node_modules` 重装 |
+| examples 看不到代码改动 | examples 引用的是子包 `dist/`，改完源码后必须重建（`pnpm build` 或开着 `pnpm dev`） |
 
 ## License
 
