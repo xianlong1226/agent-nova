@@ -73,6 +73,142 @@ function createRouter(providers, defaultId, fallbackChain) {
   });
 }
 
+// src/limiter.ts
+function createBucket(maxTokens, refillPerSecond) {
+  return {
+    tokens: maxTokens,
+    maxTokens,
+    refillRate: refillPerSecond,
+    lastRefill: Date.now()
+  };
+}
+function refill(bucket) {
+  const now = Date.now();
+  const elapsed = (now - bucket.lastRefill) / 1e3;
+  bucket.tokens = Math.min(bucket.maxTokens, bucket.tokens + elapsed * bucket.refillRate);
+  bucket.lastRefill = now;
+}
+function consume(bucket, cost) {
+  refill(bucket);
+  if (bucket.tokens >= cost) {
+    bucket.tokens -= cost;
+    return true;
+  }
+  return false;
+}
+function waitTimeMs(bucket, cost) {
+  refill(bucket);
+  const deficit = cost - bucket.tokens;
+  if (deficit <= 0) return 0;
+  return Math.ceil(deficit / bucket.refillRate * 1e3);
+}
+var DEFAULT_RATE_LIMITER_CONFIG = {
+  callsPerMinute: 60,
+  tokensPerMinute: 1e5,
+  perProvider: {},
+  backoffMultiplier: 2,
+  maxBackoffMs: 6e4
+};
+var RateLimiter = class {
+  globalCallBucket;
+  globalTokenBucket;
+  providerCallBuckets = /* @__PURE__ */ new Map();
+  providerTokenBuckets = /* @__PURE__ */ new Map();
+  config;
+  providerBackoff = /* @__PURE__ */ new Map();
+  // providerId → next allowed timestamp
+  constructor(config) {
+    this.config = { ...DEFAULT_RATE_LIMITER_CONFIG, ...config };
+    this.globalCallBucket = createBucket(
+      this.config.callsPerMinute,
+      this.config.callsPerMinute / 60
+    );
+    this.globalTokenBucket = createBucket(
+      this.config.tokensPerMinute,
+      this.config.tokensPerMinute / 60
+    );
+  }
+  /** Acquire permission to make an API call. Waits if rate limited. */
+  async acquire(providerId, estimatedTokens) {
+    const backoffUntil = this.providerBackoff.get(providerId) ?? 0;
+    if (Date.now() < backoffUntil) {
+      const delay = backoffUntil - Date.now();
+      await this.sleep(delay);
+    }
+    const callBucket = this.getProviderCallBucket(providerId);
+    const tokenBucket = this.getProviderTokenBucket(providerId);
+    let totalWait = 0;
+    totalWait = Math.max(totalWait, waitTimeMs(this.globalCallBucket, 1));
+    totalWait = Math.max(totalWait, waitTimeMs(this.globalTokenBucket, estimatedTokens));
+    totalWait = Math.max(totalWait, waitTimeMs(callBucket, 1));
+    totalWait = Math.max(totalWait, waitTimeMs(tokenBucket, estimatedTokens));
+    if (totalWait > 0) {
+      await this.sleep(totalWait);
+    }
+    consume(this.globalCallBucket, 1);
+    consume(this.globalTokenBucket, estimatedTokens);
+    consume(callBucket, 1);
+    consume(tokenBucket, estimatedTokens);
+  }
+  /** Report a 429 response — triggers adaptive backoff for this provider */
+  reportRateLimited(providerId, retryAfterMs) {
+    const currentBackoff = this.providerBackoff.get(providerId) ?? 0;
+    const baseDelay = retryAfterMs ?? 5e3;
+    const backoffMs = Math.min(
+      baseDelay * this.config.backoffMultiplier,
+      this.config.maxBackoffMs
+    );
+    this.providerBackoff.set(providerId, Math.max(currentBackoff, Date.now() + backoffMs));
+  }
+  /** Reset backoff for a provider (on successful response) */
+  reportSuccess(providerId) {
+    this.providerBackoff.delete(providerId);
+  }
+  /** Get current bucket status for monitoring */
+  getStatus() {
+    refill(this.globalCallBucket);
+    refill(this.globalTokenBucket);
+    const providers = {};
+    for (const [id] of this.providerCallBuckets) {
+      const callBucket = this.providerCallBuckets.get(id);
+      const tokenBucket = this.providerTokenBuckets.get(id);
+      refill(callBucket);
+      refill(tokenBucket);
+      const backoffUntil = this.providerBackoff.get(id) ?? 0;
+      providers[id] = {
+        callsRemaining: Math.floor(callBucket.tokens),
+        tokensRemaining: Math.floor(tokenBucket.tokens),
+        backoffMs: Math.max(0, backoffUntil - Date.now())
+      };
+    }
+    return {
+      global: {
+        callsRemaining: Math.floor(this.globalCallBucket.tokens),
+        tokensRemaining: Math.floor(this.globalTokenBucket.tokens)
+      },
+      providers
+    };
+  }
+  // ─── Private ─────────────────────────────────────────────────────
+  getProviderCallBucket(providerId) {
+    if (!this.providerCallBuckets.has(providerId)) {
+      const limit = this.config.perProvider[providerId]?.callsPerMinute ?? this.config.callsPerMinute;
+      this.providerCallBuckets.set(providerId, createBucket(limit, limit / 60));
+    }
+    return this.providerCallBuckets.get(providerId);
+  }
+  getProviderTokenBucket(providerId) {
+    if (!this.providerTokenBuckets.has(providerId)) {
+      const limit = this.config.perProvider[providerId]?.tokensPerMinute ?? this.config.tokensPerMinute;
+      this.providerTokenBuckets.set(providerId, createBucket(limit, limit / 60));
+    }
+    return this.providerTokenBuckets.get(providerId);
+  }
+  sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+};
+
 // src/adapters/openai.ts
 import { createOpenAI } from "@ai-sdk/openai";
 function createOpenAICompatibleProvider(config) {
@@ -155,6 +291,7 @@ function claudeHaiku35(apiKey) {
 }
 export {
   ProviderRouter,
+  RateLimiter,
   claudeHaiku35,
   claudeSonnet4,
   createOpenAICompatibleProvider,

@@ -1,0 +1,23 @@
+{
+  "name": "code-review.diff",
+  "description": "获取 Git diff 内容，用于代码审查时分析变更",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "base": {
+        "type": "string",
+        "description": "基准分支或 commit，默认 HEAD~1"
+      },
+      "head": {
+        "type": "string",
+        "description": "目标分支或 commit，默认 HEAD"
+      },
+      "files": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "限定文件范围（glob）"
+      }
+    }
+  },
+  "permission": { "level": "read" }
+}

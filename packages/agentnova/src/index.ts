@@ -88,7 +88,8 @@ import { DEFAULT_PERMISSION_CONFIG } from '@agentnova/permission'
 import type { AgentConfig } from '@agentnova/core'
 import type { ProviderRouter } from '@agentnova/providers'
 import type { ToolDefinition } from '@agentnova/tools'
-import type { Partial } from './types.js'
+import type { DeepPartial } from './types.js'
+export type { DeepPartial } from './types.js'
 
 interface QuickAgentConfig {
   /** Model provider ID (e.g. 'deepseek-chat', 'openai-gpt4o') */
@@ -102,7 +103,7 @@ interface QuickAgentConfig {
   /** Additional tools */
   tools?: ToolDefinition[]
   /** Permission config override */
-  permissions?: Partial<typeof DEFAULT_PERMISSION_CONFIG>
+  permissions?: Partial<import('@agentnova/permission').PermissionConfig>
   /** Include built-in fs tools? Default: true */
   includeFsTools?: boolean
   /** Include built-in shell tools? Default: true */

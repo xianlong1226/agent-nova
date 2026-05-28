@@ -1,0 +1,12 @@
+{
+  "name": "code-review",
+  "version": "1.0.0",
+  "description": "代码审查技能 — 发现 bug、安全漏洞、性能问题和可维护性问题",
+  "prompt": "SKILL.md",
+  "tools": ["tools/lint.json", "tools/diff.json"],
+  "knowledge": ["knowledge/best-practices.md", "knowledge/security-checklist.md"],
+  "defaultConfig": {
+    "strictness": "normal",
+    "lintRules": []
+  }
+}

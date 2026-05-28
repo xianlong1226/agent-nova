@@ -2,7 +2,42 @@
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
-import Database from "better-sqlite3";
+var IMPORTANCE_HALFLIFE = {
+  critical: Infinity,
+  // never decays — user preferences, core instructions
+  high: 720,
+  // 30 days — project decisions, error resolutions
+  normal: 168,
+  // 7 days — current task context
+  low: 24
+  // 1 day — ephemeral observations
+};
+var IMPORTANCE_BASE_SCORE = {
+  critical: 1,
+  high: 0.8,
+  normal: 0.5,
+  low: 0.2
+};
+function decayedScore(importance, timestamp, now = Date.now()) {
+  const base = IMPORTANCE_BASE_SCORE[importance];
+  const halflife = IMPORTANCE_HALFLIFE[importance];
+  if (halflife === Infinity) return base;
+  const ageHours = (now - timestamp) / (1e3 * 60 * 60);
+  return base * Math.pow(0.5, ageHours / halflife);
+}
+function classifyImportance(content, key) {
+  const lower = `${key} ${content}`.toLowerCase();
+  if (/\b(always|never|must|prefer|i want|i like|i use|rule|policy)\b/.test(lower)) {
+    return "critical";
+  }
+  if (/\b(fixed|resolved|decided|architecture|config|\.ts|\.js|\.json|src\/|packages\/)\b/.test(lower)) {
+    return "high";
+  }
+  if (content.length < 30 || /^(note:|fyi:|btw:)/i.test(lower)) {
+    return "low";
+  }
+  return "normal";
+}
 var WorkingMemory = class {
   store = /* @__PURE__ */ new Map();
   async save(key, content, metadata) {
@@ -78,6 +113,10 @@ var ProjectMemory = class {
   async list() {
     return Array.from(this.memories.keys());
   }
+  /** Get all items (for full injection into system prompt) */
+  getAll() {
+    return Array.from(this.memories.values());
+  }
   /** Persist memories back to AGENT.md */
   async persist() {
     const lines = ["# AGENT.md \u2014 Project Memory\n"];
@@ -110,38 +149,90 @@ ${item.content}
   }
 };
 var LongTermMemory = class {
-  db;
+  db = null;
+  // SqlJsDatabase — typed as any for ease
+  dbPath;
   embedFn;
   embeddingDim;
+  maxMemories;
+  enableDecay;
+  ready;
   constructor(config) {
-    this.db = new Database(config.dbPath);
+    this.dbPath = config.dbPath;
     this.embedFn = config.embedFn;
     this.embeddingDim = config.embeddingDim ?? 384;
+    this.maxMemories = config.maxMemories ?? 1e4;
+    this.enableDecay = config.enableDecay ?? true;
+    this.ready = this.init();
+  }
+  // ─── Async Init (sql.js WASM) ──────────────────────────────────
+  async init() {
+    const initSqlJs = (await import("sql.js")).default;
+    const SQL = await initSqlJs();
+    try {
+      const fs = await import("fs/promises");
+      const buf = await fs.readFile(this.dbPath);
+      this.db = new SQL.Database(new Uint8Array(buf));
+    } catch {
+      this.db = new SQL.Database();
+    }
     this.initSchema();
   }
+  async ensureReady() {
+    await this.ready;
+    if (!this.db) throw new Error("Database not initialized");
+    return this.db;
+  }
   initSchema() {
-    this.db.exec(`
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS memories (
         key TEXT PRIMARY KEY,
         content TEXT NOT NULL,
         metadata TEXT,
+        importance TEXT NOT NULL DEFAULT 'normal',
         embedding BLOB,
         timestamp INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idx_memories_ts ON memories(timestamp);
     `);
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_memories_ts ON memories(timestamp);");
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);");
   }
+  async persist() {
+    const db = await this.ensureReady();
+    const data = db.export();
+    const buffer = Buffer.from(data);
+    const fs = await import("fs/promises");
+    const path = await import("path");
+    const dir = path.dirname(this.dbPath);
+    try {
+      await fs.mkdir(dir, { recursive: true });
+    } catch {
+    }
+    await fs.writeFile(this.dbPath, buffer);
+  }
+  // ─── CRUD ────────────────────────────────────────────────────────
   async save(key, content, metadata) {
+    const db = await this.ensureReady();
+    const importance = classifyImportance(content, key);
     const embedding = this.embedFn ? await this.embedFn(content) : null;
     const embeddingBlob = embedding ? Buffer.from(new Float32Array(embedding).buffer) : null;
-    this.db.prepare(`
-      INSERT OR REPLACE INTO memories (key, content, metadata, embedding, timestamp)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(key, content, metadata ? JSON.stringify(metadata) : null, embeddingBlob, Date.now());
+    db.run(
+      "INSERT OR REPLACE INTO memories (key, content, metadata, importance, embedding, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+      [key, content, metadata ? JSON.stringify(metadata) : null, importance, embeddingBlob, Date.now()]
+    );
+    await this.evictIfNeeded();
+    await this.persist();
   }
   async get(key) {
-    const row = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(key);
-    if (!row) return null;
+    const db = await this.ensureReady();
+    const stmt = db.prepare("SELECT * FROM memories WHERE key = ?");
+    stmt.bind([key]);
+    if (!stmt.step()) {
+      stmt.free();
+      return null;
+    }
+    const row = stmt.getAsObject();
+    stmt.free();
     return {
       key: row.key,
       content: row.content,
@@ -150,45 +241,123 @@ var LongTermMemory = class {
     };
   }
   async search(query, topK = 5) {
+    const db = await this.ensureReady();
     if (!this.embedFn) {
       return this.keywordSearch(query, topK);
     }
     const queryEmbedding = await this.embedFn(query);
-    const rows = this.db.prepare("SELECT * FROM memories WHERE embedding IS NOT NULL").all();
-    const scored = rows.map((row) => {
-      const embedding = Array.from(new Float32Array(row.embedding.buffer));
-      const similarity = this.cosineSimilarity(queryEmbedding, embedding);
-      return { row, similarity };
-    });
-    scored.sort((a, b) => b.similarity - a.similarity);
-    return scored.slice(0, topK).map(({ row, similarity }) => ({
+    const stmt = db.prepare("SELECT * FROM memories WHERE embedding IS NOT NULL");
+    const rows = [];
+    const now = Date.now();
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      const embedding = row.embedding ? Array.from(new Float32Array(row.embedding)) : null;
+      if (!embedding) continue;
+      const semanticScore = this.cosineSimilarity(queryEmbedding, embedding);
+      const decayMultiplier = this.enableDecay ? decayedScore(row.importance, row.timestamp, now) : 1;
+      rows.push({ ...row, score: semanticScore * decayMultiplier });
+    }
+    stmt.free();
+    rows.sort((a, b) => b.score - a.score);
+    return rows.slice(0, topK).map((r) => ({
+      key: r.key,
+      content: r.content,
+      metadata: r.metadata ? JSON.parse(r.metadata) : void 0,
+      timestamp: r.timestamp,
+      relevanceScore: r.score
+    }));
+  }
+  async delete(key) {
+    const db = await this.ensureReady();
+    db.run("DELETE FROM memories WHERE key = ?", [key]);
+    await this.persist();
+  }
+  async list() {
+    const db = await this.ensureReady();
+    const stmt = db.prepare("SELECT key FROM memories");
+    const keys = [];
+    while (stmt.step()) {
+      keys.push(stmt.getAsObject().key);
+    }
+    stmt.free();
+    return keys;
+  }
+  async close() {
+    const db = await this.ensureReady();
+    await this.persist();
+    db.close();
+  }
+  /** Get memories sorted by decayed importance (for inspection/debugging) */
+  async getMemoriesByImportance() {
+    const db = await this.ensureReady();
+    const stmt = db.prepare("SELECT * FROM memories");
+    const now = Date.now();
+    const results = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      results.push({
+        key: row.key,
+        content: row.content,
+        importance: row.importance,
+        score: decayedScore(row.importance, row.timestamp, now)
+      });
+    }
+    stmt.free();
+    results.sort((a, b) => b.score - a.score);
+    return results;
+  }
+  // ─── Private ─────────────────────────────────────────────────────
+  async evictIfNeeded() {
+    const db = await this.ensureReady();
+    const countStmt = db.prepare("SELECT COUNT(*) as c FROM memories");
+    countStmt.step();
+    const count = countStmt.getAsObject().c;
+    countStmt.free();
+    if (count <= this.maxMemories) return;
+    const evictCount = Math.ceil(count - this.maxMemories * 0.9);
+    const now = Date.now();
+    const stmt = db.prepare("SELECT key, importance, timestamp FROM memories WHERE importance != ?");
+    stmt.bind(["critical"]);
+    const candidates = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      candidates.push({
+        key: row.key,
+        score: decayedScore(row.importance, row.timestamp, now)
+      });
+    }
+    stmt.free();
+    candidates.sort((a, b) => a.score - b.score);
+    const toEvict = candidates.slice(0, evictCount).map((e) => e.key);
+    if (toEvict.length > 0) {
+      for (const k of toEvict) {
+        db.run("DELETE FROM memories WHERE key = ?", [k]);
+      }
+    }
+  }
+  keywordSearch(query, topK) {
+    const q = `%${query.toLowerCase()}%`;
+    const now = Date.now();
+    const db = this.db;
+    const stmt = db.prepare(
+      "SELECT * FROM memories WHERE LOWER(content) LIKE ? OR LOWER(key) LIKE ? ORDER BY timestamp DESC"
+    );
+    stmt.bind([q, q]);
+    const rows = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      const keywordScore = 0.5;
+      const decayMultiplier = this.enableDecay ? decayedScore(row.importance, row.timestamp, now) : 1;
+      rows.push({ row, score: keywordScore * decayMultiplier });
+    }
+    stmt.free();
+    rows.sort((a, b) => b.score - a.score);
+    return rows.slice(0, topK).map(({ row, score }) => ({
       key: row.key,
       content: row.content,
       metadata: row.metadata ? JSON.parse(row.metadata) : void 0,
       timestamp: row.timestamp,
-      relevanceScore: similarity
-    }));
-  }
-  async delete(key) {
-    this.db.prepare("DELETE FROM memories WHERE key = ?").run(key);
-  }
-  async list() {
-    const rows = this.db.prepare("SELECT key FROM memories").all();
-    return rows.map((r) => r.key);
-  }
-  close() {
-    this.db.close();
-  }
-  keywordSearch(query, topK) {
-    const q = `%${query.toLowerCase()}%`;
-    const rows = this.db.prepare(
-      "SELECT * FROM memories WHERE LOWER(content) LIKE ? OR LOWER(key) LIKE ? ORDER BY timestamp DESC LIMIT ?"
-    ).all(q, q, topK);
-    return rows.map((row) => ({
-      key: row.key,
-      content: row.content,
-      metadata: row.metadata ? JSON.parse(row.metadata) : void 0,
-      timestamp: row.timestamp
+      relevanceScore: score
     }));
   }
   cosineSimilarity(a, b) {
@@ -211,30 +380,37 @@ var MemoryInjector = class {
   working;
   project;
   longTerm;
-  /** Collect relevant memories and format for context injection */
-  async inject(query, topK = 5) {
+  /**
+   * Collect relevant memories and format for context injection.
+   * Now accepts budgetInfo from ContextManager for adaptive scaling.
+   */
+  async inject(query, topK = 5, budgetInfo) {
     const parts = [];
+    const maxLen = budgetInfo?.maxItemLength ?? 2e3;
     const projectItems = await this.project.search(query, topK);
     if (projectItems.length > 0) {
+      const items = this.applyBudget(projectItems, budgetInfo);
       parts.push("## Project Memory");
-      for (const item of projectItems) {
+      for (const item of items) {
         parts.push(`### ${item.key}
-${item.content}`);
+${this.truncate(item.content, maxLen)}`);
       }
     }
     const workingItems = await this.working.search(query, topK);
     if (workingItems.length > 0) {
+      const items = this.applyBudget(workingItems, budgetInfo);
       parts.push("## Working Context");
-      for (const item of workingItems) {
-        parts.push(`- **${item.key}**: ${item.content}`);
+      for (const item of items) {
+        parts.push(`- **${item.key}**: ${this.truncate(item.content, maxLen)}`);
       }
     }
     if (this.longTerm) {
       const ltItems = await this.longTerm.search(query, topK);
       if (ltItems.length > 0) {
+        const items = this.applyBudget(ltItems, budgetInfo);
         parts.push("## Relevant Memories");
-        for (const item of ltItems) {
-          parts.push(`- ${item.content}`);
+        for (const item of items) {
+          parts.push(`- ${this.truncate(item.content, maxLen)}`);
         }
       }
     }
@@ -257,11 +433,34 @@ ${item.content}`);
         break;
     }
   }
+  // ─── Budget Helpers ──────────────────────────────────────────────
+  /** Trim items to fit remaining budget */
+  applyBudget(items, budget) {
+    if (!budget) return items;
+    const result = [];
+    let usedTokens = 0;
+    for (const item of items) {
+      const estimate = Math.ceil(item.content.length / 3);
+      if (usedTokens + estimate > budget.remaining) break;
+      result.push(item);
+      usedTokens += estimate;
+    }
+    return result;
+  }
+  /** Truncate content to max length */
+  truncate(content, maxLen) {
+    if (content.length <= maxLen) return content;
+    return content.slice(0, maxLen - 20) + "\n... [truncated]";
+  }
 };
 export {
+  IMPORTANCE_BASE_SCORE,
+  IMPORTANCE_HALFLIFE,
   LongTermMemory,
   MemoryInjector,
   ProjectMemory,
-  WorkingMemory
+  WorkingMemory,
+  classifyImportance,
+  decayedScore
 };
 //# sourceMappingURL=index.js.map

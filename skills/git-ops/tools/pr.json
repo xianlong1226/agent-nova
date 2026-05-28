@@ -1,0 +1,32 @@
+{
+  "name": "git-ops.pr",
+  "description": "创建 Pull Request：收集变更摘要，生成 PR 标题和描述",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "description": "PR 标题（留空则根据 commits 自动生成）"
+      },
+      "body": {
+        "type": "string",
+        "description": "PR 描述（留空则根据 diff 自动生成）"
+      },
+      "base": {
+        "type": "string",
+        "description": "目标分支，默认 main"
+      },
+      "draft": {
+        "type": "boolean",
+        "description": "是否创建为 Draft PR",
+        "default": false
+      },
+      "reviewers": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "指定 reviewer 列表"
+      }
+    }
+  },
+  "permission": { "level": "write" }
+}

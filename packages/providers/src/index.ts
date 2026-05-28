@@ -1,5 +1,7 @@
 export { ProviderRouter, createRouter } from './router.js'
 export type { ProviderConfig, ProviderId, RoutingConfig, TaskComplexity } from './router.js'
+export { RateLimiter } from './limiter.js'
+export type { RateLimiterConfig } from './limiter.js'
 
 export {
   createOpenAICompatibleProvider,

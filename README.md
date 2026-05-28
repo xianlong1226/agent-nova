@@ -2,6 +2,15 @@
 
 🔮 极简 AI Agent 开发框架，TypeScript 原生支持。
 
+## 特性
+
+- 🔧 **Tool-First** — 一切能力通过工具暴露，Zod 类型安全
+- 🛡️ **Safe-by-Default** — 危险操作默认拦截，显式授权才放行
+- 🧠 **Context-Aware** — 智能上下文压缩，不浪费 token
+- 🧩 **Skill-Driven** — 能力模块化，按需加载
+- 🔄 **Multi-Provider** — 模型路由 + 降级链，自动容错
+- 📋 **Full Tracing** — 执行轨迹记录 + 回放，完整可观测
+
 ## 快速开始
 
 ```bash
@@ -12,6 +21,33 @@ pnpm install
 
 # 运行
 pnpm dev "帮我看看当前目录有什么文件"
+```
+
+## CLI 命令
+
+```bash
+# 创建新项目
+agentnova create my-agent
+
+# 添加自定义工具（支持命名空间路径如 db.query）
+agentnova add-tool db.query        # → src/tools/db/query.ts
+agentnova add-tool slack.notify    # → src/tools/slack/notify.ts
+
+# 添加技能模板
+agentnova add-skill code-review    # → skills/code-review/
+
+# 在项目中运行 Agent
+agentnova run "帮我整理项目文件"
+
+# 技能管理
+agentnova skill list               # 列出已安装技能
+agentnova skill search <query>     # 搜索技能
+agentnova skill install <source>   # 从 Git/npm 安装技能
+agentnova skill uninstall <name>   # 卸载技能
+agentnova skill publish <name>     # 打包技能用于分发
+
+# 版本
+agentnova --version
 ```
 
 ## 手动使用
@@ -203,3 +239,11 @@ agentnova              — 统一入口 + CLI
 ## License
 
 MIT
+
+---
+
+📚 **更多文档**
+
+- [使用指南](./docs/GUIDE.md) — 从零到生产，手把手教程
+- [API 参考](./docs/API.md) — 完整接口文档
+- [项目方案](./PROJECT.md) — 架构设计与技术决策

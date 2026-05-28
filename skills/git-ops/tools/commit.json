@@ -1,0 +1,29 @@
+{
+  "name": "git-ops.commit",
+  "description": "智能提交：分析变更内容，生成规范的 commit message，执行提交",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "message": {
+        "type": "string",
+        "description": "自定义 commit message（留空则自动生成）"
+      },
+      "addAll": {
+        "type": "boolean",
+        "description": "是否暂存所有变更（git add -A）",
+        "default": false
+      },
+      "files": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "指定暂存的文件列表"
+      },
+      "push": {
+        "type": "boolean",
+        "description": "提交后是否自动 push（默认 false，需确认）",
+        "default": false
+      }
+    }
+  },
+  "permission": { "level": "write" }
+}

@@ -181,6 +181,136 @@ var SkillRegistry = class {
     }
     return true;
   }
+  /**
+   * Publish a skill to a Git remote or npm registry
+   *
+   * Git mode:
+   *   1. Initialize git repo in skill dir (if not already)
+   *   2. Commit all files
+   *   3. Push to remote
+   *
+   * npm mode:
+   *   1. Generate package.json wrapper
+   *   2. Run npm publish
+   */
+  async publish(name, options) {
+    const skillDir = join2(this.skillsDir, name);
+    if (!existsSync2(skillDir)) {
+      return { success: false, message: `Skill directory not found: ${skillDir}` };
+    }
+    const configPath = join2(skillDir, "skill.config.json");
+    let skillConfig = { name, version: "1.0.0" };
+    if (existsSync2(configPath)) {
+      try {
+        skillConfig = JSON.parse(await readFile2(configPath, "utf-8"));
+      } catch {
+      }
+    }
+    if (options?.registry || !options?.remote && existsSync2(join2(skillDir, "package.json"))) {
+      return this.publishToNpm(skillDir, skillConfig, options);
+    }
+    if (options?.remote) {
+      return this.publishToGit(skillDir, name, { remote: options.remote, tag: options.tag, dryRun: options.dryRun });
+    }
+    return {
+      success: false,
+      message: "No publish target specified. Provide --remote (Git URL) or --registry (npm URL)"
+    };
+  }
+  /** Push skill to a Git remote */
+  async publishToGit(skillDir, name, options) {
+    const branch = options.tag ?? "main";
+    const execCmd = (cmd) => new Promise((resolve2, reject) => {
+      exec(cmd, { cwd: skillDir }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`${cmd}: ${stderr || err.message}`));
+        else resolve2(stdout.trim());
+      });
+    });
+    try {
+      if (!existsSync2(join2(skillDir, ".git"))) {
+        await execCmd("git init");
+      }
+      await execCmd("git add -A");
+      try {
+        await execCmd(`git commit -m "publish skill: ${name}"`);
+      } catch {
+      }
+      try {
+        await execCmd("git remote get-url origin");
+        await execCmd(`git remote set-url origin ${options.remote}`);
+      } catch {
+        await execCmd(`git remote add origin ${options.remote}`);
+      }
+      if (options.dryRun) {
+        return {
+          success: true,
+          message: `[DRY RUN] Would push ${name} to ${options.remote} (${branch})`,
+          url: options.remote
+        };
+      }
+      await execCmd(`git push -u origin HEAD:${branch} --force`);
+      const manifest = this.manifests.get(name);
+      if (manifest) {
+        manifest.source = options.remote;
+        await this.save();
+      }
+      return {
+        success: true,
+        message: `\u2705 Published ${name} to ${options.remote} (${branch})`,
+        url: options.remote
+      };
+    } catch (err) {
+      return { success: false, message: `Git publish failed: ${err.message}` };
+    }
+  }
+  /** Publish skill as an npm package */
+  async publishToNpm(skillDir, skillConfig, options) {
+    const pkgName = `@agentnova/skill-${skillConfig.name}` || `agentnova-skill-${skillConfig.name}`;
+    const pkgPath = join2(skillDir, "package.json");
+    if (!existsSync2(pkgPath)) {
+      const pkgJson = {
+        name: pkgName,
+        version: skillConfig.version || "1.0.0",
+        description: skillConfig.description || "",
+        main: "skill.config.json",
+        files: ["**/*.json", "**/*.md", "tools/**/*", "knowledge/**/*"],
+        keywords: skillConfig.tags || ["agentnova", "skill"],
+        license: "MIT"
+      };
+      await writeFile(pkgPath, JSON.stringify(pkgJson, null, 2), "utf-8");
+    }
+    const execCmd = (cmd) => new Promise((resolve2, reject) => {
+      exec(cmd, { cwd: skillDir }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`${cmd}: ${stderr || err.message}`));
+        else resolve2(stdout.trim());
+      });
+    });
+    try {
+      const registryFlag = options?.registry ? ` --registry ${options.registry}` : "";
+      const tagFlag = options?.tag ? ` --tag ${options.tag}` : "";
+      const dryRunFlag = options?.dryRun ? " --dry-run" : "";
+      if (options?.dryRun) {
+        await execCmd(`npm pack${dryRunFlag}`);
+        return {
+          success: true,
+          message: `[DRY RUN] Would publish ${pkgName}@${skillConfig.version} to npm`
+        };
+      }
+      await execCmd(`npm publish --access public${registryFlag}${tagFlag}`);
+      const manifest = this.manifests.get(skillConfig.name);
+      if (manifest) {
+        manifest.source = pkgName;
+        await this.save();
+      }
+      return {
+        success: true,
+        message: `\u2705 Published ${pkgName}@${skillConfig.version} to npm`,
+        url: `https://www.npmjs.com/package/${pkgName}`
+      };
+    } catch (err) {
+      return { success: false, message: `npm publish failed: ${err.message}` };
+    }
+  }
 };
 export {
   SkillLoader,

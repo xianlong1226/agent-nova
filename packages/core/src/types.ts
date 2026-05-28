@@ -73,6 +73,10 @@ export interface ContextConfig {
   toolOutputTruncate: 'tail' | 'head'
   /** Per-provider context window overrides */
   contextWindowOverrides?: Record<string, number>
+  /** Maximum tokens for auto-summaries (default: 1000) */
+  maxSummaryTokens?: number
+  /** Preemptive compression threshold — compress when projected to exceed (default: 0.85) */
+  preemptiveThreshold?: number
 }
 
 // ─── Agent State ───────────────────────────────────────────────────

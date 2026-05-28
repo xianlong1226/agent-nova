@@ -5,9 +5,10 @@
 
  RUN  v3.2.4 /Users/long/workspace/projects/agent-sdk/packages/providers
 
-No test files found, exiting with code 1
+ ✓ test/router.test.ts (1 test) 2ms
 
-include: **/*.{test,spec}.?(c|m)[jt]s?(x)
-exclude:  **/node_modules/**, **/dist/**, **/cypress/**, **/.{idea,git,cache,output,temp}/**, **/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build,eslint,prettier}.config.*
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  09:48:13
+   Duration  371ms (transform 24ms, setup 0ms, collect 25ms, tests 2ms, environment 0ms, prepare 88ms)
 
- ELIFECYCLE  Test failed. See above for more details.

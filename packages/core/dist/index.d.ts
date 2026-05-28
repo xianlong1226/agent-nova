@@ -51,7 +51,7 @@ declare class ResourceLimitError extends Error {
     constructor(reason: string);
 }
 declare const PROVIDER_PRICING: Record<string, TokenPrice>;
-/** Get pricing for a provider, fallback to GPT-4o pricing */
+/** Get pricing for a provider, supports provider:model exact match with provider fallback */
 declare function getPricing(providerId: string): TokenPrice;
 
 type AgentEventName = 'agent:start' | 'agent:end' | 'agent:error' | 'llm:call' | 'llm:response' | 'tool:call' | 'tool:result' | 'tool:approved' | 'tool:denied' | 'context:compressed' | 'memory:stored' | 'memory:retrieved' | 'skill:activated' | 'skill:deactivated' | 'provider:fallback' | 'step';
@@ -88,6 +88,10 @@ interface ContextConfig {
     toolOutputTruncate: 'tail' | 'head';
     /** Per-provider context window overrides */
     contextWindowOverrides?: Record<string, number>;
+    /** Maximum tokens for auto-summaries (default: 1000) */
+    maxSummaryTokens?: number;
+    /** Preemptive compression threshold — compress when projected to exceed (default: 0.85) */
+    preemptiveThreshold?: number;
 }
 interface AgentState {
     step: number;
@@ -192,6 +196,26 @@ declare class TraceReplay {
     toJSON(): string;
 }
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/**
+ * Production Logger — file output, level filtering, sampling, rotation
+ */
+interface LoggerConfig {
+    /** Minimum log level (default: 'info') */
+    minLevel?: LogLevel;
+    /** Whether to also output to console (default: true in dev, false in prod) */
+    console?: boolean;
+    /** Log file path (default: no file output) */
+    filePath?: string;
+    /** Maximum log file size in bytes before rotation (default: 10MB) */
+    maxFileSize?: number;
+    /** Number of rotated log files to keep (default: 3) */
+    maxFiles?: number;
+    /** Sampling rate for debug/info logs: 1 = every, 10 = every 10th (default: 1) */
+    samplingRate?: number;
+    /** Trace ID for correlation */
+    traceId?: string;
+}
 interface LogEntry {
     level: LogLevel;
     timestamp: number;
@@ -202,24 +226,29 @@ interface LogEntry {
 declare class StructuredLogger {
     private logs;
     private minLevel;
+    private consoleOutput;
+    private filePath?;
+    private maxFileSize;
+    private maxFiles;
+    private samplingRate;
     private traceId?;
-    private levelPriority;
-    constructor(options?: {
-        minLevel?: LogLevel;
-        traceId?: string;
-    });
+    private writeQueue;
+    private logCounts;
+    constructor(config?: LoggerConfig);
     debug(message: string, data?: Record<string, unknown>): void;
     info(message: string, data?: Record<string, unknown>): void;
     warn(message: string, data?: Record<string, unknown>): void;
     error(message: string, data?: Record<string, unknown>): void;
     private log;
-    /** Get all logs */
+    private writeToFile;
+    private rotateLogs;
+    /** Get all logs (in-memory) */
     getLogs(level?: LogLevel): ReadonlyArray<LogEntry>;
-    /** Export logs as newline-delimited JSON */
+    /** Export as newline-delimited JSON */
     exportNDJSON(): string;
-    /** Clear logs */
+    /** Clear in-memory logs */
     clear(): void;
-    /** Set trace ID for correlation */
+    /** Set trace ID */
     setTraceId(id: string): void;
 }
 
@@ -243,6 +272,7 @@ declare class Agent {
     private projectMemory;
     private longTermMemory?;
     private memoryInjector;
+    private projectMemoryReady;
     private skills;
     private skillDirs;
     private hooks;
@@ -270,10 +300,10 @@ declare class Agent {
     getLogger(): StructuredLogger;
     /** Store a memory item */
     remember(key: string, content: string, layer?: 'working' | 'project' | 'longterm'): Promise<void>;
+    private memoryMessageIdx;
     private injectMemories;
     private executeStep;
     private executeStepStreaming;
-    private processStepResult;
     private executeToolCall;
     private buildResult;
     private resetState;
@@ -286,9 +316,55 @@ declare class Agent {
 declare function createAgent(config: AgentConfig): Agent;
 
 /**
- * Context Manager — keeps the conversation within token budget
- * by compressing older messages, truncating tool output,
- * and dynamically adapting to the current provider's context window.
+ * Lightweight wrapper around SkillLoader.
+ * Extracted from agent.ts to keep concerns separate.
+ */
+declare class SkillLoaderWorker {
+    private skills;
+    loadAll(dirs: string[]): Promise<void>;
+    activateForInput(input: string): Array<{
+        name: string;
+        active: boolean;
+    }>;
+    getActiveTools(): ToolDefinition[];
+    getActivePrompts(): string[];
+}
+
+/**
+ * Compression result with metadata for observability
+ */
+interface CompressionResult {
+    messages: CoreMessage[];
+    originalTokenCount: number;
+    compressedTokenCount: number;
+    strategy: CompressionStrategy;
+    summarized?: boolean;
+    droppedCount: number;
+}
+/**
+ * Token budget breakdown — used for intelligent allocation
+ */
+interface TokenBudget {
+    /** Total context window */
+    window: number;
+    /** Usable tokens (after system prompt + response reserve) */
+    usable: number;
+    /** Currently consumed tokens */
+    consumed: number;
+    /** Remaining tokens */
+    remaining: number;
+    /** Tokens needed for next LLM response (estimate) */
+    responseReserve: number;
+}
+/**
+ * Context Manager — production-grade context compression
+ *
+ * Key improvements over v1:
+ * 1. LLM-powered summarization with pronoun resolution (no external summarizer needed)
+ * 2. Adaptive memory injection based on remaining budget
+ * 3. Progressive compression instead of all-or-nothing
+ * 4. Semantic prioritization: references, errors, user decisions get higher priority
+ * 5. Token-budget-aware tool output truncation
  */
 declare class ContextManager {
     private router;
@@ -306,25 +382,65 @@ declare class ContextManager {
     getContextWindow(): number;
     /** Get usable context (reserve space for system prompt + response) */
     getUsableContext(): number;
+    /** Calculate current token budget */
+    getBudget(messages: CoreMessage[]): TokenBudget;
     /** Check if compression is needed */
     needsCompression(messages: CoreMessage[]): boolean;
     /** Calculate how much we need to compress (0-1) */
     compressionRatio(messages: CoreMessage[]): number;
     /**
-     * Compress messages if needed.
-     * Returns potentially reduced message array.
+     * Calculate how many memory items can be injected given current budget.
+     * Returns { topK, maxItemLength } — adaptively scales down when tight.
+     */
+    calculateMemoryBudget(messages: CoreMessage[], requestedTopK: number): {
+        topK: number;
+        maxItemLength: number;
+        budgetRemaining: number;
+    };
+    /**
+     * Compress messages with full metadata tracking.
+     * Now supports auto-LLM summarization when no external summarizer is provided.
      */
     compress(messages: CoreMessage[], summarizer?: (text: string) => Promise<string>): Promise<CoreMessage[]>;
-    /** Truncate a tool output to fit budget */
-    truncateToolOutput(output: unknown): string;
-    /** Assign priority to a message (higher = more important to keep) */
+    /**
+     * Full compression with observability metadata.
+     */
+    compressWithMeta(messages: CoreMessage[], externalSummarizer?: (text: string) => Promise<string>): Promise<CompressionResult>;
+    /**
+     * Proactively compress after a tool call that returns large output.
+     * Called by Agent before the tool result is added to messages.
+     */
+    compressAfterToolCall(messages: CoreMessage[], toolOutputTokens: number, summarizer?: (text: string) => Promise<string>): Promise<CoreMessage[]>;
+    /** Truncate a tool output to fit budget, with awareness of remaining space */
+    truncateToolOutput(output: unknown, messages?: CoreMessage[]): string;
+    /**
+     * Assign priority to a message based on semantic content analysis.
+     * This is much smarter than the v1 version that only looked at role.
+     */
     messagePriority(msg: CoreMessage): number;
+    /** Annotate messages with semantic metadata for smarter compression */
+    private annotateMessages;
+    /**
+     * Extract key messages using semantic annotations.
+     * Much smarter than v1 — preserves error info, pronoun references, and user decisions.
+     */
+    private extractKeyMessages;
+    /** Alias for backward compat */
+    private extractKeyMessagesSemantic;
+    /**
+     * Summarize a block of messages.
+     * Strategy:
+     * 1. If external summarizer provided, use it
+     * 2. Otherwise, try using the Agent's own LLM (via router) for auto-summarization
+     * 3. If neither works, fall back to semantic extraction
+     */
+    private summarizeBlock;
+    /** Format messages for summarization input */
+    private formatMessagesForSummary;
+    /** Build a summary message with standard format */
+    private buildSummaryMessage;
     /** Split messages at the N-th most recent turn boundary */
     private splitMessages;
-    /** Summarize a block of older messages using LLM */
-    private summarizeMessages;
-    /** Extract key messages (user + assistant, compress tool results) */
-    private extractKeyMessages;
     /** Extract plain text from a message */
     private extractText;
     /**
@@ -335,4 +451,122 @@ declare class ContextManager {
 }
 declare const DEFAULT_CONTEXT_CONFIG: ContextConfig;
 
-export { Agent, type AgentConfig, type AgentEvent, type AgentEventName, type AgentResult, type AgentRunOptions, type AgentState, type CompressionStrategy, type ContextConfig, ContextManager, DEFAULT_CONTEXT_CONFIG, type EventHandler, type HookContext, type HookFn, type HookName, type LogEntry, type LogLevel, PROVIDER_PRICING, ResourceLimitError, type StepInfo, StructuredLogger, type TokenPrice, type Trace, TraceCollector, type TraceEntry, TraceReplay, type UsageSnapshot, UsageTracker, createAgent, getPricing };
+/**
+ * Structured Error System — production-grade error handling
+ *
+ * All Agent errors carry a machine-readable code, retry strategy,
+ * and contextual metadata. No more string matching on error messages.
+ */
+type ErrorCode = 'PROVIDER_TIMEOUT' | 'PROVIDER_RATE_LIMIT' | 'PROVIDER_AUTH' | 'PROVIDER_QUOTA' | 'PROVIDER_MODEL_NOT_FOUND' | 'PROVIDER_SERVER_ERROR' | 'PROVIDER_NETWORK' | 'TOOL_NOT_FOUND' | 'TOOL_VALIDATION' | 'TOOL_PERMISSION_DENIED' | 'TOOL_EXECUTION' | 'TOOL_TIMEOUT' | 'TOOL_ABORTED' | 'MEMORY_STORAGE' | 'MEMORY_NOT_FOUND' | 'MEMORY_CORRUPTION' | 'CONTEXT_OVERFLOW' | 'CONTEXT_COMPRESSION_FAILED' | 'LIMIT_STEPS' | 'LIMIT_TOKENS' | 'LIMIT_TOOL_CALLS' | 'LIMIT_TIMEOUT' | 'LIMIT_COST' | 'SESSION_CONCURRENT' | 'SESSION_NOT_FOUND' | 'SESSION_CORRUPTION' | 'CONFIG_INVALID' | 'CONFIG_MISSING';
+type RetryCategory = 'never' | 'immediate' | 'backoff' | 'after_cooldown';
+declare class AgentError extends Error {
+    readonly code: ErrorCode;
+    readonly retry: RetryCategory;
+    readonly cause?: Error;
+    readonly context: Record<string, unknown>;
+    readonly timestamp: number;
+    constructor(options: {
+        code: ErrorCode;
+        message: string;
+        cause?: Error;
+        context?: Record<string, unknown>;
+    });
+    /** Check if this error is retryable */
+    get retryable(): boolean;
+    /** Get recommended delay before retry (ms) */
+    get retryDelayMs(): number;
+    /** Serialize for logging/persistence */
+    toJSON(): Record<string, unknown>;
+    /** Create from an unknown thrown value */
+    static from(err: unknown, code?: ErrorCode): AgentError;
+}
+/** Check if an error is retryable */
+declare function isRetryable(err: unknown): boolean;
+/** Get recommended retry delay */
+declare function getRetryDelay(err: unknown): number;
+/** Wrap a provider error with structured code */
+declare function wrapProviderError(err: unknown, providerId?: string): AgentError;
+/** Create a tool execution error */
+declare function toolError(tool: string, message: string, cause?: Error): AgentError;
+
+/**
+ * Session Manager — concurrency safety + user-scoped data isolation
+ *
+ * Guarantees:
+ * 1. Same Agent instance can serve multiple users concurrently
+ * 2. Each user gets isolated messages, memory, state
+ * 3. Same user gets concurrent lock (queue, not crash)
+ * 4. Sessions persist to disk and can be restored
+ */
+
+interface SessionData {
+    sessionId: string;
+    userId: string;
+    messages: CoreMessage[];
+    state: AgentState;
+    createdAt: number;
+    updatedAt: number;
+    metadata: Record<string, unknown>;
+}
+interface SessionConfig {
+    /** Directory for session persistence (default: ./sessions) */
+    storageDir: string;
+    /** Whether to persist sessions to disk (default: true) */
+    persist: boolean;
+    /** Auto-save interval in ms (0 = disabled, default: 30000) */
+    autoSaveIntervalMs: number;
+    /** Maximum concurrent runs per user (default: 1 — queue) */
+    maxConcurrentPerUser: number;
+}
+declare class UserSession {
+    readonly userId: string;
+    readonly sessionId: string;
+    messages: CoreMessage[];
+    state: AgentState;
+    createdAt: number;
+    updatedAt: number;
+    metadata: Record<string, unknown>;
+    /** Queue of pending runs — ensures serial execution per user */
+    private runQueue;
+    private running;
+    constructor(userId: string, sessionId?: string);
+    /** Acquire run lock — returns a release function */
+    acquire(): Promise<() => void>;
+    private release;
+    private createInitialState;
+    resetState(): void;
+    toData(): SessionData;
+    static fromData(data: SessionData): UserSession;
+}
+declare class SessionManager {
+    private sessions;
+    private userIndex;
+    private config;
+    private autoSaveTimer?;
+    constructor(config?: Partial<SessionConfig>);
+    /** Create or get a session for a user */
+    createSession(userId: string, sessionId?: string): UserSession;
+    /** Get session by ID */
+    getSession(sessionId: string): UserSession | undefined;
+    /** Get all sessions for a user */
+    getUserSessions(userId: string): UserSession[];
+    /** Get or create the latest session for a user */
+    getLatestSession(userId: string): UserSession;
+    /** Run a function with session lock (concurrent-safe) */
+    withSession<T>(userId: string, fn: (session: UserSession) => Promise<T>): Promise<T>;
+    /** Delete a session */
+    deleteSession(sessionId: string): Promise<void>;
+    /** Save a single session to disk */
+    saveSession(session: UserSession): Promise<void>;
+    /** Save all active sessions */
+    saveAll(): Promise<void>;
+    /** Load a session from disk */
+    loadSession(sessionId: string): Promise<UserSession | null>;
+    /** Load all sessions from storage directory */
+    loadAllSessions(): Promise<number>;
+    /** Graceful shutdown — save all and stop timer */
+    shutdown(): Promise<void>;
+    private getSessionPath;
+}
+
+export { Agent, type AgentConfig, AgentError, type AgentEvent, type AgentEventName, type AgentResult, type AgentRunOptions, type AgentState, type CompressionResult, type CompressionStrategy, type ContextConfig, ContextManager, DEFAULT_CONTEXT_CONFIG, type ErrorCode, type EventHandler, type HookContext, type HookFn, type HookName, type LogEntry, type LogLevel, PROVIDER_PRICING, ResourceLimitError, type RetryCategory, type SessionConfig, type SessionData, SessionManager, SkillLoaderWorker, type StepInfo, StructuredLogger, type TokenPrice, type Trace, TraceCollector, type TraceEntry, TraceReplay, type UsageSnapshot, UsageTracker, createAgent, getPricing, getRetryDelay, isRetryable, toolError, wrapProviderError };

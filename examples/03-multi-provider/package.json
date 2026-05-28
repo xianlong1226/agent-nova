@@ -1,0 +1,18 @@
+{
+  "name": "agentnova-example-multi-provider",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "agentnova": "workspace:*",
+    "ai": "^4.3.0",
+    "@ai-sdk/openai": "^1.3.0",
+    "@ai-sdk/anthropic": "^1.3.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

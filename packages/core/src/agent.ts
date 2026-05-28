@@ -7,8 +7,9 @@ import type { PermissionConfig, ResourceLimits, ApprovalRequest } from '@agentno
 import { ProviderRouter } from '@agentnova/providers'
 import { ContextManager, DEFAULT_CONTEXT_CONFIG } from './context.js'
 import { UsageTracker, getPricing, ResourceLimitError, type UsageSnapshot } from './usage.js'
-import { createToolContext } from './logger.js'
-import { TraceCollector, TraceReplay, StructuredLogger, type Trace, type TraceEntry } from './trace.js'
+import { createToolContext, StructuredLogger } from './logger.js'
+import { TraceCollector, TraceReplay, type Trace, type TraceEntry } from './trace.js'
+import { SkillLoaderWorker } from './skill-worker.js'
 import { WorkingMemory, ProjectMemory, MemoryInjector, LongTermMemory } from '@agentnova/memory'
 import type { LongTermMemoryConfig } from '@agentnova/memory'
 import type {
@@ -52,6 +53,7 @@ export class Agent {
   private projectMemory: ProjectMemory
   private longTermMemory?: LongTermMemory
   private memoryInjector: MemoryInjector
+  private projectMemoryReady: Promise<void> = Promise.resolve()
 
   // Skills
   private skills: SkillLoaderWorker
@@ -92,7 +94,7 @@ export class Agent {
     // Init memory
     this.workingMemory = new WorkingMemory()
     this.projectMemory = new ProjectMemory(this.workingDir)
-    this.projectMemory.load() // fire and forget
+    this.projectMemoryReady = this.projectMemory.load().catch(() => {})
     if (config.longTermMemory) {
       this.longTermMemory = new LongTermMemory(config.longTermMemory)
     }
@@ -176,8 +178,14 @@ export class Agent {
         await this.injectMemories(prompt)
 
         if (this.contextMgr.needsCompression(this.messages)) {
-          this.messages = await this.contextMgr.compress(this.messages)
-          this.emit('context:compressed', { step: this.state.step })
+          const compressed = await this.contextMgr.compressWithMeta(this.messages)
+          this.messages = compressed.messages
+          this.emit('context:compressed', {
+            step: this.state.step,
+            originalTokens: compressed.originalTokenCount,
+            compressedTokens: compressed.compressedTokenCount,
+            strategy: compressed.strategy,
+          })
         }
 
         const shouldContinue = await this.executeStep(options)
@@ -213,8 +221,14 @@ export class Agent {
         await this.injectMemories(prompt)
 
         if (this.contextMgr.needsCompression(this.messages)) {
-          this.messages = await this.contextMgr.compress(this.messages)
-          this.emit('context:compressed', { step: this.state.step })
+          const compressed = await this.contextMgr.compressWithMeta(this.messages)
+          this.messages = compressed.messages
+          this.emit('context:compressed', {
+            step: this.state.step,
+            originalTokens: compressed.originalTokenCount,
+            compressedTokens: compressed.compressedTokenCount,
+            strategy: compressed.strategy,
+          })
         }
 
         const shouldContinue = await this.executeStepStreaming(options)
@@ -222,8 +236,14 @@ export class Agent {
       }
       return this.buildResult()
     } catch (err) {
-      if (err instanceof ResourceLimitError) { return this.buildResult() }
-      throw err
+      if (err instanceof ResourceLimitError) {
+        this.emit('agent:error', { error: err.message, step: this.state.step })
+        return this.buildResult()
+      }
+      const error = err instanceof Error ? err : new Error(String(err))
+      this.emit('agent:error', { error: error.message, step: this.state.step })
+      await this.runHook('onError', { agentState: this.state, step: this.state.step })
+      throw error
     }
   }
 
@@ -259,17 +279,23 @@ export class Agent {
 
   // ─── Memory Injection ────────────────────────────────────────────
 
+  private memoryMessageIdx: number = -1
+
   private async injectMemories(prompt: string): Promise<void> {
-    const memoryContext = await this.memoryInjector.inject(prompt, 5)
+    // Use budget-aware memory injection
+    const budget = this.contextMgr.calculateMemoryBudget(this.messages, 5)
+    const memoryContext = await this.memoryInjector.inject(prompt, 5, {
+      maxItemLength: budget.maxItemLength,
+      remaining: budget.budgetRemaining,
+    })
     if (memoryContext) {
-      // Find and update the system message with memory context
-      const sysIdx = this.messages.findIndex(m => typeof m.content === 'string' && m.content.includes('Project Memory'))
-      if (sysIdx >= 0) {
-        // Already has memory injected, update it
-        // For simplicity, we inject as a system message after the first one
+      if (this.memoryMessageIdx >= 0 && this.memoryMessageIdx < this.messages.length) {
+        // Update existing memory message in-place
+        this.messages[this.memoryMessageIdx] = { role: 'system', content: memoryContext }
       } else {
-        // Inject as a user-like context message
+        // Inject as a system message after the first one
         this.messages.splice(1, 0, { role: 'system', content: memoryContext })
+        this.memoryMessageIdx = 1
       }
     }
 
@@ -305,9 +331,71 @@ export class Agent {
           system: this.systemPrompt,
           messages: this.messages.slice(1),
           tools: aiTools,
+          maxSteps: 1,
           abortSignal: options?.signal,
         })
-        return this.processStepResult(result.text, result.toolCalls, result.usage, stepStart, options)
+
+        // Record usage from the final step
+        if (result.usage) {
+          this.usage.recordTokens(result.usage.promptTokens ?? 0, result.usage.completionTokens ?? 0)
+          this.state.totalTokensUsed = this.usage.totalTokens
+          this.state.totalCost = this.usage.estimatedCost
+        }
+
+        await this.runHook('onAfterLLMCall', { agentState: this.state, step: this.state.step, messages: this.messages })
+        this.emit('llm:response', { step: this.state.step, tokensUsed: result.usage?.totalTokens })
+
+        const stepInfo: StepInfo = {
+          step: this.state.step,
+          text: result.text || undefined,
+          durationMs: Date.now() - stepStart,
+          tokensUsed: result.usage ? { input: result.usage.promptTokens ?? 0, output: result.usage.completionTokens ?? 0 } : undefined,
+        }
+
+        // Collect tool calls/results from the SDK response steps
+        if (result.steps && result.steps.length > 0) {
+          for (const sdkStep of result.steps) {
+            if (sdkStep.toolCalls?.length) {
+              stepInfo.toolCalls = sdkStep.toolCalls.map(tc => ({ tool: tc.toolName, args: tc.args as Record<string, unknown> }))
+            }
+            if (sdkStep.toolResults?.length) {
+              stepInfo.toolResults = sdkStep.toolResults.map(tr => {
+                const trAny = tr as any
+                return {
+                  tool: trAny.toolName ?? trAny.tool ?? 'unknown',
+                  output: trAny.result ?? trAny.output,
+                  error: trAny.error,
+                  durationMs: 0,
+                  approved: true,
+                } as ToolResult
+              })
+            }
+          }
+        } else if (result.toolCalls && result.toolCalls.length > 0) {
+          stepInfo.toolCalls = result.toolCalls.map(tc => ({ tool: tc.toolName, args: tc.args as Record<string, unknown> }))
+        }
+
+        // Sync messages: SDK returns complete message list for this turn
+        // Rebuild our messages with system prompt + SDK messages
+        if (result.response?.messages && result.response.messages.length > 0) {
+          this.messages = [this.messages[0], ...result.response.messages]
+          // Adjust memoryMessageIdx if we had injected memory
+          if (this.memoryMessageIdx >= 0) {
+            this.memoryMessageIdx = 1 // right after system prompt
+          }
+        } else {
+          // Fallback: manually construct
+          if (result.text) this.messages.push({ role: 'assistant', content: result.text })
+        }
+
+        this.steps.push(stepInfo)
+        this.usage.recordStep()
+        this.state.step++
+        if (options?.onStep) options.onStep(stepInfo)
+        this.emit('step', { step: this.state.step })
+
+        // Continue if there were tool calls (Agent loop)
+        return !!(result.toolCalls?.length || (result.steps?.some(s => s.toolCalls?.length)))
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))
         if (!this.router.shouldFallback(err)) throw lastError
@@ -335,25 +423,74 @@ export class Agent {
           system: this.systemPrompt,
           messages: this.messages.slice(1),
           tools: aiTools,
+          maxSteps: 1,
           abortSignal: options?.signal,
         })
 
-        const consumed = await streamResults
         let fullText = ''
-        for await (const chunk of consumed.textStream) {
+        for await (const chunk of (await streamResults).textStream) {
           fullText += chunk
           if (options?.onText) options.onText(chunk)
         }
 
-        const finalText = typeof consumed.text === 'string' ? consumed.text : fullText
-        const finalToolCalls = Array.isArray(consumed.toolCalls) ? consumed.toolCalls : []
-        return this.processStepResult(
-          finalText || undefined,
-          finalToolCalls,
-          consumed.usage,
-          stepStart,
-          options,
-        )
+        const consumed = await streamResults
+        const finalUsage = await consumed.usage
+
+        if (finalUsage) {
+          this.usage.recordTokens(finalUsage.promptTokens ?? 0, finalUsage.completionTokens ?? 0)
+          this.state.totalTokensUsed = this.usage.totalTokens
+          this.state.totalCost = this.usage.estimatedCost
+        }
+
+        await this.runHook('onAfterLLMCall', { agentState: this.state, step: this.state.step, messages: this.messages })
+        this.emit('llm:response', { step: this.state.step, tokensUsed: finalUsage?.totalTokens })
+
+        const stepInfo: StepInfo = {
+          step: this.state.step,
+          text: fullText || undefined,
+          durationMs: Date.now() - stepStart,
+          tokensUsed: finalUsage ? { input: finalUsage.promptTokens ?? 0, output: finalUsage.completionTokens ?? 0 } : undefined,
+        }
+
+        // Collect tool info from steps
+        const stepsData = (consumed as any).steps
+        if (stepsData?.length) {
+          for (const sdkStep of stepsData) {
+            if (sdkStep.toolCalls?.length) {
+              stepInfo.toolCalls = sdkStep.toolCalls.map((tc: any) => ({ tool: tc.toolName, args: tc.args }))
+            }
+            if (sdkStep.toolResults?.length) {
+              stepInfo.toolResults = sdkStep.toolResults.map((tr: any) => ({
+                tool: tr.toolName ?? 'unknown',
+                output: tr.result ?? tr.output,
+                error: tr.error,
+                durationMs: 0,
+                approved: true,
+              }))
+            }
+          }
+        }
+
+        // Sync messages from SDK response
+        const responseMsgs = (consumed as any).response?.messages
+        if (responseMsgs?.length) {
+          this.messages = [this.messages[0], ...responseMsgs]
+          if (this.memoryMessageIdx >= 0) {
+            this.memoryMessageIdx = 1
+          }
+        } else if (fullText) {
+          this.messages.push({ role: 'assistant', content: fullText })
+        }
+
+        this.steps.push(stepInfo)
+        this.usage.recordStep()
+        this.state.step++
+        if (options?.onStep) options.onStep(stepInfo)
+        this.emit('step', { step: this.state.step })
+
+        const hasToolCalls = stepsData?.some((s: any) => s.toolCalls?.length)
+          ?? ((consumed as any).toolCalls?.length > 0)
+        return !!hasToolCalls
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))
         if (!this.router.shouldFallback(err)) throw lastError
@@ -362,62 +499,6 @@ export class Agent {
     }
 
     throw lastError ?? new Error('All providers failed')
-  }
-
-  private async processStepResult(
-    text: string | undefined,
-    toolCalls: any[] | undefined,
-    usage: any,
-    stepStart: number,
-    options?: AgentRunOptions,
-  ): Promise<boolean> {
-    const stepDuration = Date.now() - stepStart
-
-    if (usage) {
-      this.usage.recordTokens(usage.promptTokens ?? 0, usage.completionTokens ?? 0)
-      this.state.totalTokensUsed = this.usage.totalTokens
-      this.state.totalCost = this.usage.estimatedCost
-    }
-
-    await this.runHook('onAfterLLMCall', { agentState: this.state, step: this.state.step, messages: this.messages })
-    this.emit('llm:response', { step: this.state.step, tokensUsed: usage?.totalTokens })
-
-    const stepInfo: StepInfo = {
-      step: this.state.step,
-      text: text || undefined,
-      durationMs: stepDuration,
-      tokensUsed: usage ? { input: usage.promptTokens ?? 0, output: usage.completionTokens ?? 0 } : undefined,
-    }
-
-    if (toolCalls && toolCalls.length > 0) {
-      const toolResults: ToolResult[] = []
-      stepInfo.toolCalls = toolCalls.map(tc => ({ tool: tc.toolName, args: tc.args as Record<string, unknown> }))
-
-      for (const tc of toolCalls) {
-        const call: ToolCall = { tool: tc.toolName, args: tc.args as Record<string, unknown> }
-        const tr = await this.executeToolCall(call, options?.signal)
-        toolResults.push(tr)
-      }
-
-      stepInfo.toolResults = toolResults
-      this.messages.push({ role: 'assistant', content: text ?? '' })
-      for (const tr of toolResults) {
-        this.messages.push({
-          role: 'user',
-          content: `[Tool: ${tr.tool}] ${tr.error ? `Error: ${tr.error}` : JSON.stringify(tr.output)}`,
-        } as CoreMessage)
-      }
-    } else {
-      if (text) this.messages.push({ role: 'assistant', content: text })
-    }
-
-    this.steps.push(stepInfo)
-    this.usage.recordStep()
-    this.state.step++
-    if (options?.onStep) options.onStep(stepInfo)
-    this.emit('step', { step: this.state.step })
-
-    return !!(toolCalls?.length)
   }
 
   private async executeToolCall(call: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
@@ -451,7 +532,7 @@ export class Agent {
     )
 
     const toolResult = await this.engine.execute(call, toolCtx)
-    if (toolResult.output) toolResult.output = this.contextMgr.truncateToolOutput(toolResult.output)
+    if (toolResult.output) toolResult.output = this.contextMgr.truncateToolOutput(toolResult.output, this.messages)
     this.emit('tool:result', { tool: call.tool, result: toolResult })
 
     await this.runHook('onAfterToolCall', { agentState: this.state, step: this.state.step, toolCall: call, toolResult })
@@ -476,6 +557,7 @@ export class Agent {
   }
 
   private async resetState(prompt: string): Promise<void> {
+    await this.projectMemoryReady // ensure project memory is loaded
     this.state = this.createInitialState()
     this.steps = []
     this.messages = [{ role: 'system', content: await this.buildSystemPrompt() }]
@@ -483,6 +565,8 @@ export class Agent {
     this.usage.reset()
     this.guard.resetAllowAlways()
     this.contextMgr.adaptToProvider()
+    this.tracer.reset()
+    this.memoryMessageIdx = -1
   }
 
   // ─── Private Helpers ─────────────────────────────────────────────
@@ -500,7 +584,14 @@ export class Agent {
         tools[toolDef.name] = {
           description: toolDef.description,
           parameters: toolDef.parameters as z.ZodTypeAny,
-          execute: async (args: unknown) => args,
+          execute: async (args: unknown) => {
+            // Delegate to Agent's tool execution pipeline (permission + hooks + engine)
+            const call: ToolCall = { tool: toolDef.name, args: args as Record<string, unknown> }
+            const result = await this.executeToolCall(call)
+            // Return the actual output or error for the SDK to consume
+            if (result.error) return { error: result.error }
+            return result.output
+          },
         }
       }
     }
@@ -555,47 +646,3 @@ export class Agent {
 
 export function createAgent(config: AgentConfig): Agent { return new Agent(config) }
 
-// ─── Skill Loader Worker (lightweight wrapper) ─────────────────────
-
-class SkillLoaderWorker {
-  private skills: Array<{ name: string; tools: ToolDefinition[]; prompt: string; active: boolean; activateOn?: (input: string) => boolean }> = []
-
-  async loadAll(dirs: string[]) {
-    const { SkillLoader } = await import('@agentnova/skills')
-    const loader = new SkillLoader()
-    const loaded = await loader.loadAll(dirs)
-    this.skills = loaded.map(s => ({
-      name: s.name,
-      tools: s.tools ?? [],
-      prompt: s.prompt ?? '',
-      active: s.active,
-      activateOn: s.activateOn,
-    }))
-  }
-
-  activateForInput(input: string): Array<{ name: string; active: boolean }> {
-    const active: Array<{ name: string; active: boolean }> = []
-    for (const skill of this.skills) {
-      if (skill.activateOn) {
-        if (skill.activateOn(input)) {
-          if (!skill.active) {
-            skill.active = true
-            active.push(skill)
-          }
-        }
-      }
-    }
-    return active
-  }
-
-  getActiveTools(): ToolDefinition[] {
-    return this.skills.filter(s => s.active).flatMap(s => s.tools)
-  }
-
-  getActivePrompts(): string[] {
-    return this.skills.filter(s => s.active && s.prompt).map(s => s.prompt)
-  }
-}
-
-// Re-export types
-export type { UsageSnapshot } from './usage.js'

@@ -5,3 +5,10 @@
 
  RUN  v3.2.4 /Users/long/workspace/projects/agent-sdk/packages/tools
 
+ ✓ test/registry.test.ts (7 tests) 2ms
+
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+   Start at  09:48:13
+   Duration  404ms (transform 41ms, setup 0ms, collect 60ms, tests 2ms, environment 0ms, prepare 48ms)
+

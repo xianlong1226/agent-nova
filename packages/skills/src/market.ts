@@ -148,4 +148,185 @@ export class SkillRegistry {
 
     return true
   }
+
+  /**
+   * Publish a skill to a Git remote or npm registry
+   *
+   * Git mode:
+   *   1. Initialize git repo in skill dir (if not already)
+   *   2. Commit all files
+   *   3. Push to remote
+   *
+   * npm mode:
+   *   1. Generate package.json wrapper
+   *   2. Run npm publish
+   */
+  async publish(
+    name: string,
+    options?: {
+      remote?: string      // Git remote URL (e.g. git@github.com:user/skills.git)
+      registry?: string    // npm registry URL (default: https://registry.npmjs.org)
+      tag?: string         // Git branch or npm dist-tag (default: main / latest)
+      dryRun?: boolean     // Preview without actually pushing
+    },
+  ): Promise<{ success: boolean; message: string; url?: string }> {
+    const skillDir = join(this.skillsDir, name)
+    if (!existsSync(skillDir)) {
+      return { success: false, message: `Skill directory not found: ${skillDir}` }
+    }
+
+    // Load skill config for metadata
+    const configPath = join(skillDir, 'skill.config.json')
+    let skillConfig: any = { name, version: '1.0.0' }
+    if (existsSync(configPath)) {
+      try {
+        skillConfig = JSON.parse(await readFile(configPath, 'utf-8'))
+      } catch { /* use defaults */ }
+    }
+
+    // npm publish mode
+    if (options?.registry || (!options?.remote && existsSync(join(skillDir, 'package.json')))) {
+      return this.publishToNpm(skillDir, skillConfig, options)
+    }
+
+    // Git push mode (default)
+    if (options?.remote) {
+      return this.publishToGit(skillDir, name, { remote: options.remote, tag: options.tag, dryRun: options.dryRun })
+    }
+
+    return {
+      success: false,
+      message: 'No publish target specified. Provide --remote (Git URL) or --registry (npm URL)',
+    }
+  }
+
+  /** Push skill to a Git remote */
+  private async publishToGit(
+    skillDir: string,
+    name: string,
+    options: { remote: string; tag?: string; dryRun?: boolean },
+  ): Promise<{ success: boolean; message: string; url?: string }> {
+    const branch = options.tag ?? 'main'
+
+    const execCmd = (cmd: string) =>
+      new Promise<string>((resolve, reject) => {
+        exec(cmd, { cwd: skillDir }, (err, stdout, stderr) => {
+          if (err) reject(new Error(`${cmd}: ${stderr || err.message}`))
+          else resolve(stdout.trim())
+        })
+      })
+
+    try {
+      // Initialize git if needed
+      if (!existsSync(join(skillDir, '.git'))) {
+        await execCmd('git init')
+      }
+
+      // Add all files
+      await execCmd('git add -A')
+
+      // Commit
+      try {
+        await execCmd(`git commit -m "publish skill: ${name}"`)
+      } catch {
+        // Nothing to commit, that's fine
+      }
+
+      // Add remote
+      try {
+        await execCmd('git remote get-url origin')
+        await execCmd(`git remote set-url origin ${options.remote}`)
+      } catch {
+        await execCmd(`git remote add origin ${options.remote}`)
+      }
+
+      if (options.dryRun) {
+        return {
+          success: true,
+          message: `[DRY RUN] Would push ${name} to ${options.remote} (${branch})`,
+          url: options.remote,
+        }
+      }
+
+      // Push
+      await execCmd(`git push -u origin HEAD:${branch} --force`)
+
+      // Update manifest
+      const manifest = this.manifests.get(name)
+      if (manifest) {
+        manifest.source = options.remote
+        await this.save()
+      }
+
+      return {
+        success: true,
+        message: `✅ Published ${name} to ${options.remote} (${branch})`,
+        url: options.remote,
+      }
+    } catch (err: any) {
+      return { success: false, message: `Git publish failed: ${err.message}` }
+    }
+  }
+
+  /** Publish skill as an npm package */
+  private async publishToNpm(
+    skillDir: string,
+    skillConfig: any,
+    options?: { registry?: string; tag?: string; dryRun?: boolean },
+  ): Promise<{ success: boolean; message: string; url?: string }> {
+    const pkgName = `@agentnova/skill-${skillConfig.name}` || `agentnova-skill-${skillConfig.name}`
+
+    // Ensure package.json exists
+    const pkgPath = join(skillDir, 'package.json')
+    if (!existsSync(pkgPath)) {
+      const pkgJson = {
+        name: pkgName,
+        version: skillConfig.version || '1.0.0',
+        description: skillConfig.description || '',
+        main: 'skill.config.json',
+        files: ['**/*.json', '**/*.md', 'tools/**/*', 'knowledge/**/*'],
+        keywords: skillConfig.tags || ['agentnova', 'skill'],
+        license: 'MIT',
+      }
+      await writeFile(pkgPath, JSON.stringify(pkgJson, null, 2), 'utf-8')
+    }
+
+    const execCmd = (cmd: string) =>
+      new Promise<string>((resolve, reject) => {
+        exec(cmd, { cwd: skillDir }, (err, stdout, stderr) => {
+          if (err) reject(new Error(`${cmd}: ${stderr || err.message}`))
+          else resolve(stdout.trim())
+        })
+      })
+
+    try {
+      const registryFlag = options?.registry ? ` --registry ${options.registry}` : ''
+      const tagFlag = options?.tag ? ` --tag ${options.tag}` : ''
+      const dryRunFlag = options?.dryRun ? ' --dry-run' : ''
+
+      if (options?.dryRun) {
+        await execCmd(`npm pack${dryRunFlag}`)
+        return {
+          success: true,
+          message: `[DRY RUN] Would publish ${pkgName}@${skillConfig.version} to npm`,
+        }
+      }
+
+      await execCmd(`npm publish --access public${registryFlag}${tagFlag}`)
+
+      const manifest = this.manifests.get(skillConfig.name)
+      if (manifest) {
+        manifest.source = pkgName
+        await this.save()
+      }
+
+      return {
+        success: true,
+        message: `✅ Published ${pkgName}@${skillConfig.version} to npm`,
+        url: `https://www.npmjs.com/package/${pkgName}`,
+      }
+    } catch (err: any) {
+      return { success: false, message: `npm publish failed: ${err.message}` }
+    }
+  }
 }

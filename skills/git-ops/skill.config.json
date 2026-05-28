@@ -1,0 +1,12 @@
+{
+  "name": "git-ops",
+  "version": "1.0.0",
+  "description": "Git 操作技能 — 提交、分支管理、合并、创建 PR",
+  "prompt": "SKILL.md",
+  "tools": ["tools/commit.json", "tools/pr.json"],
+  "knowledge": ["knowledge/branch-strategy.md", "knowledge/commit-conventions.md"],
+  "defaultConfig": {
+    "commitStyle": "conventional",
+    "branchPrefix": "feat/"
+  }
+}

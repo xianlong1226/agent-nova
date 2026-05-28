@@ -2,24 +2,6 @@
 > @agentnova/memory@0.1.0 build /Users/long/workspace/projects/agent-sdk/packages/memory
 > tsup
 
-▲ [WARNING] The condition "types" here will never be used as it comes after both "import" and "require" [package.json]
-
-    package.json:13:6:
-      13 │       "types": "./dist/index.d.ts"
-         ╵       ~~~~~~~
-
-  The "import" condition comes earlier and will be used for all "import" statements:
-
-    package.json:11:6:
-      11 │       "import": "./dist/index.js",
-         ╵       ~~~~~~~~
-
-  The "require" condition comes earlier and will be used for all "require" calls:
-
-    package.json:12:6:
-      12 │       "require": "./dist/index.cjs",
-         ╵       ~~~~~~~~~
-
 CLI Building entry: src/index.ts
 CLI Using tsconfig: tsconfig.json
 CLI tsup v8.5.1
@@ -28,55 +10,13 @@ CLI Target: es2022
 CLI Cleaning output folder
 ESM Build start
 CJS Build start
-
- WARN  [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe condition "types" here will never be used as it comes after both "import" and "require"[0m [package.json]
-
-    package.json:13:6:
-[37m      13 │       [32m"types"[37m: "./dist/index.d.ts"
-         ╵       [32m~~~~~~~[0m
-
-  The "import" condition comes earlier and will be used for all "import" statements:
-
-    package.json:11:6:
-[37m      11 │       [32m"import"[37m: "./dist/index.js",
-         ╵       [32m~~~~~~~~[0m
-
-  The "require" condition comes earlier and will be used for all "require" calls:
-
-    package.json:12:6:
-[37m      12 │       [32m"require"[37m: "./dist/index.cjs",
-         ╵       [32m~~~~~~~~~[0m
-
-
-
-
- WARN  [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe condition "types" here will never be used as it comes after both "import" and "require"[0m [package.json]
-
-    package.json:13:6:
-[37m      13 │       [32m"types"[37m: "./dist/index.d.ts"
-         ╵       [32m~~~~~~~[0m
-
-  The "import" condition comes earlier and will be used for all "import" statements:
-
-    package.json:11:6:
-[37m      11 │       [32m"import"[37m: "./dist/index.js",
-         ╵       [32m~~~~~~~~[0m
-
-  The "require" condition comes earlier and will be used for all "require" calls:
-
-    package.json:12:6:
-[37m      12 │       [32m"require"[37m: "./dist/index.cjs",
-         ╵       [32m~~~~~~~~~[0m
-
-
-
-ESM dist/index.js     8.42 KB
-ESM dist/index.js.map 17.27 KB
-ESM ⚡️ Build success in 24ms
-CJS dist/index.cjs     10.28 KB
-CJS dist/index.cjs.map 17.34 KB
-CJS ⚡️ Build success in 23ms
+ESM dist/index.js     14.90 KB
+ESM dist/index.js.map 30.67 KB
+ESM ⚡️ Build success in 15ms
+CJS dist/index.cjs     16.90 KB
+CJS dist/index.cjs.map 30.74 KB
+CJS ⚡️ Build success in 15ms
 DTS Build start
-DTS ⚡️ Build success in 397ms
-DTS dist/index.d.ts  3.15 KB
-DTS dist/index.d.cts 3.15 KB
+DTS ⚡️ Build success in 338ms
+DTS dist/index.d.ts  5.14 KB
+DTS dist/index.d.cts 5.14 KB

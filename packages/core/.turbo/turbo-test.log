@@ -5,3 +5,44 @@
 
  RUN  v3.2.4 /Users/long/workspace/projects/agent-sdk/packages/core
 
+ ✓ test/usage.test.ts (11 tests) 2ms
+stdout | test/trace.test.ts > StructuredLogger > should log at all levels
+[DEBUG] 01:48:16.126 debug msg {"key":1}
+[INFO] 01:48:16.127 info msg
+
+stderr | test/trace.test.ts > StructuredLogger > should log at all levels
+[WARN] 01:48:16.127 warn msg
+[ERROR] 01:48:16.127 error msg {"code":"ERR"}
+
+stderr | test/trace.test.ts > StructuredLogger > should filter by minimum level
+[WARN] 01:48:16.127 yes
+[ERROR] 01:48:16.127 yes
+
+stdout | test/trace.test.ts > StructuredLogger > should filter logs by level
+stderr | test/trace.test.ts > StructuredLogger > should filter logs by level
+[INFO] 01:48:16.127 info1
+[INFO] 01:48:16.127 info2
+[ERROR] 01:48:16.127 error1
+
+
+stdout | test/trace.test.ts > StructuredLogger > should include trace ID
+[INFO] 01:48:16.127 test
+stderr | test/trace.test.ts > StructuredLogger > should export NDJSON
+
+stdout | test/trace.test.ts > StructuredLogger > should export NDJSON
+[WARN] 01:48:16.127 second
+
+[INFO] 01:48:16.127 first
+
+stdout | test/trace.test.ts > StructuredLogger > should clear logs
+[INFO] 01:48:16.128 a
+
+ ✓ test/trace.test.ts (12 tests) 6ms
+ ✓ test/context.test.ts (16 tests) 3ms
+ ✓ test/agent.test.ts (9 tests) 8ms
+
+ Test Files  4 passed (4)
+      Tests  48 passed (48)
+   Start at  09:48:15
+   Duration  288ms (transform 177ms, setup 0ms, collect 306ms, tests 19ms, environment 0ms, prepare 168ms)
+

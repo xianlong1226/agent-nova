@@ -5,3 +5,10 @@
 
  RUN  v3.2.4 /Users/long/workspace/projects/agent-sdk/packages/permission
 
+ ✓ test/guard.test.ts (13 tests) 7ms
+
+ Test Files  1 passed (1)
+      Tests  13 passed (13)
+   Start at  09:48:13
+   Duration  510ms (transform 83ms, setup 0ms, collect 116ms, tests 7ms, environment 0ms, prepare 122ms)
+

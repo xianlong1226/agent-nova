@@ -5,9 +5,10 @@
 
  RUN  v3.2.4 /Users/long/workspace/projects/agent-sdk/packages/skills
 
-No test files found, exiting with code 1
+ ✓ test/loader.test.ts (1 test) 7ms
 
-include: **/*.{test,spec}.?(c|m)[jt]s?(x)
-exclude:  **/node_modules/**, **/dist/**, **/cypress/**, **/.{idea,git,cache,output,temp}/**, **/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build,eslint,prettier}.config.*
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  09:48:14
+   Duration  174ms (transform 19ms, setup 0ms, collect 13ms, tests 7ms, environment 0ms, prepare 31ms)
 
- ELIFECYCLE  Test failed. See above for more details.

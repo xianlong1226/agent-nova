@@ -2,3 +2,13 @@
 > agentnova@0.1.0 test /Users/long/workspace/projects/agent-sdk/packages/agentnova
 > vitest run
 
+
+ RUN  v3.2.4 /Users/long/workspace/projects/agent-sdk/packages/agentnova
+
+ ✓ test/index.test.ts (1 test) 73ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  09:48:16
+   Duration  224ms (transform 55ms, setup 0ms, collect 13ms, tests 73ms, environment 0ms, prepare 31ms)
+

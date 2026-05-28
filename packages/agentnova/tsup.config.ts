@@ -1,9 +1,11 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  entry: ['src/index.ts', 'src/cli.ts'],
   format: ['esm', 'cjs'],
-  dts: false,  // consumers import types from sub-packages directly
+  dts: {
+    resolve: ['@agentnova/core', '@agentnova/tools', '@agentnova/permission', '@agentnova/memory', '@agentnova/skills', '@agentnova/providers'],
+  },
   clean: true,
   sourcemap: true,
   external: [

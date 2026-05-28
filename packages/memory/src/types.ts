@@ -8,6 +8,7 @@ export interface MemoryItem {
   metadata?: Record<string, string>
   timestamp: number
   relevanceScore?: number
+  importance?: 'critical' | 'high' | 'normal' | 'low'
 }
 
 export interface MemoryStore {

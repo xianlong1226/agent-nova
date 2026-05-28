@@ -31,25 +31,33 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var index_exports = {};
 __export(index_exports, {
   Agent: () => Agent,
+  AgentError: () => AgentError,
   ContextManager: () => ContextManager,
   DEFAULT_CONTEXT_CONFIG: () => DEFAULT_CONTEXT_CONFIG,
   PROVIDER_PRICING: () => PROVIDER_PRICING,
   ResourceLimitError: () => ResourceLimitError,
+  SessionManager: () => SessionManager,
+  SkillLoaderWorker: () => SkillLoaderWorker,
   StructuredLogger: () => StructuredLogger,
   TraceCollector: () => TraceCollector,
   TraceReplay: () => TraceReplay,
   UsageTracker: () => UsageTracker,
   createAgent: () => createAgent,
-  getPricing: () => getPricing
+  getPricing: () => getPricing,
+  getRetryDelay: () => getRetryDelay,
+  isRetryable: () => isRetryable,
+  toolError: () => toolError,
+  wrapProviderError: () => wrapProviderError
 });
 module.exports = __toCommonJS(index_exports);
 
 // src/agent.ts
-var import_ai = require("ai");
+var import_ai2 = require("ai");
 var import_tools = require("@agentnova/tools");
 var import_permission = require("@agentnova/permission");
 
 // src/context.ts
+var import_ai = require("ai");
 var ContextManager = class {
   constructor(config, router) {
     this.router = router;
@@ -81,7 +89,7 @@ var ContextManager = class {
     const charsPerToken = cjkRatio > 0.3 ? 2 : 4 - cjkRatio * 2;
     return Math.ceil(totalChars / charsPerToken);
   }
-  // ─── Context Window ──────────────────────────────────────────────
+  // ─── Token Budget ────────────────────────────────────────────────
   /** Get the context window size for the current default provider */
   getContextWindow() {
     const defaultProvider = this.router.getDefault();
@@ -91,6 +99,20 @@ var ContextManager = class {
   getUsableContext() {
     const window = this.getContextWindow();
     return Math.floor(window * 0.8);
+  }
+  /** Calculate current token budget */
+  getBudget(messages) {
+    const window = this.getContextWindow();
+    const usable = Math.floor(window * 0.8);
+    const consumed = this.estimateTokens(messages);
+    const responseReserve = Math.max(2e3, Math.floor((usable - consumed) * 0.3));
+    return {
+      window,
+      usable,
+      consumed,
+      remaining: Math.max(0, usable - consumed - responseReserve),
+      responseReserve
+    };
   }
   /** Check if compression is needed */
   needsCompression(messages) {
@@ -105,55 +127,283 @@ var ContextManager = class {
     if (tokens <= target) return 0;
     return Math.min(1 - target / tokens, 0.7);
   }
+  // ─── Adaptive Memory Injection ───────────────────────────────────
+  /**
+   * Calculate how many memory items can be injected given current budget.
+   * Returns { topK, maxItemLength } — adaptively scales down when tight.
+   */
+  calculateMemoryBudget(messages, requestedTopK) {
+    const budget = this.getBudget(messages);
+    const remaining = budget.remaining;
+    if (remaining < 2e3) {
+      return { topK: Math.min(1, requestedTopK), maxItemLength: 200, budgetRemaining: remaining };
+    }
+    if (remaining < 5e3) {
+      return { topK: Math.min(2, requestedTopK), maxItemLength: 500, budgetRemaining: remaining };
+    }
+    if (remaining < 1e4) {
+      return { topK: Math.min(3, requestedTopK), maxItemLength: 1e3, budgetRemaining: remaining };
+    }
+    return { topK: requestedTopK, maxItemLength: 2e3, budgetRemaining: remaining };
+  }
   // ─── Compression ─────────────────────────────────────────────────
   /**
-   * Compress messages if needed.
-   * Returns potentially reduced message array.
+   * Compress messages with full metadata tracking.
+   * Now supports auto-LLM summarization when no external summarizer is provided.
    */
   async compress(messages, summarizer) {
-    if (!this.needsCompression(messages)) return messages;
+    const result = await this.compressWithMeta(messages, summarizer);
+    return result.messages;
+  }
+  /**
+   * Full compression with observability metadata.
+   */
+  async compressWithMeta(messages, externalSummarizer) {
+    const originalTokens = this.estimateTokens(messages);
+    if (!this.needsCompression(messages)) {
+      return {
+        messages,
+        originalTokenCount: originalTokens,
+        compressedTokenCount: originalTokens,
+        strategy: this.config.compressionStrategy,
+        droppedCount: 0
+      };
+    }
     const [recent, older] = this.splitMessages(messages, this.config.preserveRecentTurns);
-    if (older.length === 0) return recent;
+    if (older.length === 0) {
+      return {
+        messages: recent,
+        originalTokenCount: originalTokens,
+        compressedTokenCount: this.estimateTokens(recent),
+        strategy: "sliding-window",
+        droppedCount: older.length
+      };
+    }
     switch (this.config.compressionStrategy) {
-      case "sliding-window":
-        return recent;
+      case "sliding-window": {
+        return {
+          messages: recent,
+          originalTokenCount: originalTokens,
+          compressedTokenCount: this.estimateTokens(recent),
+          strategy: "sliding-window",
+          droppedCount: older.length
+        };
+      }
       case "summary": {
-        if (summarizer) {
-          const summary = await this.summarizeMessages(older, summarizer);
-          return [summary, ...recent];
-        }
-        return recent;
+        const summary = await this.summarizeBlock(older, externalSummarizer);
+        const result = summary ? [summary, ...recent] : recent;
+        return {
+          messages: result,
+          originalTokenCount: originalTokens,
+          compressedTokenCount: this.estimateTokens(result),
+          strategy: "summary",
+          summarized: !!summary,
+          droppedCount: older.length
+        };
       }
       case "hybrid":
       default: {
-        if (summarizer) {
-          const summary = await this.summarizeMessages(older, summarizer);
-          return [summary, ...recent];
+        const annotated = this.annotateMessages(older);
+        const summary = await this.summarizeBlock(annotated.map((a) => a.msg), externalSummarizer);
+        const keyMessages = this.extractKeyMessagesSemantic(annotated);
+        if (summary) {
+          const result2 = [summary, ...recent];
+          return {
+            messages: result2,
+            originalTokenCount: originalTokens,
+            compressedTokenCount: this.estimateTokens(result2),
+            strategy: "hybrid",
+            summarized: true,
+            droppedCount: older.length - keyMessages.length
+          };
         }
-        const keyMessages = this.extractKeyMessages(older);
-        return [...keyMessages, ...recent];
+        const result = [...keyMessages, ...recent];
+        return {
+          messages: result,
+          originalTokenCount: originalTokens,
+          compressedTokenCount: this.estimateTokens(result),
+          strategy: "hybrid",
+          droppedCount: older.length - keyMessages.length
+        };
       }
     }
   }
+  // ─── Progressive Compression ─────────────────────────────────────
+  /**
+   * Proactively compress after a tool call that returns large output.
+   * Called by Agent before the tool result is added to messages.
+   */
+  async compressAfterToolCall(messages, toolOutputTokens, summarizer) {
+    const budget = this.getBudget(messages);
+    const projectedTokens = budget.consumed + toolOutputTokens;
+    const threshold = budget.usable * 0.85;
+    if (projectedTokens > threshold) {
+      return this.compress(messages, summarizer);
+    }
+    return messages;
+  }
   // ─── Tool Output Handling ────────────────────────────────────────
-  /** Truncate a tool output to fit budget */
-  truncateToolOutput(output) {
-    const str = typeof output === "string" ? output : JSON.stringify(output, null, 2);
+  /** Truncate a tool output to fit budget, with awareness of remaining space */
+  truncateToolOutput(output, messages) {
+    let str;
+    try {
+      str = typeof output === "string" ? output : JSON.stringify(output, null, 2);
+    } catch {
+      str = String(output);
+    }
+    if (messages) {
+      const budget = this.getBudget(messages);
+      const maxGivenBudget = Math.floor(budget.remaining * 0.4);
+      const effectiveMax = Math.min(this.config.maxToolOutputLength, maxGivenBudget);
+      if (str.length <= effectiveMax) return str;
+      if (this.config.toolOutputTruncate === "head") {
+        return str.slice(0, effectiveMax) + "\n... [truncated]";
+      }
+      return "... [truncated]\n" + str.slice(-effectiveMax);
+    }
     if (str.length <= this.config.maxToolOutputLength) return str;
     if (this.config.toolOutputTruncate === "head") {
       return str.slice(0, this.config.maxToolOutputLength) + "\n... [truncated]";
     }
     return "... [truncated]\n" + str.slice(-this.config.maxToolOutputLength);
   }
-  // ─── Message Priorities ──────────────────────────────────────────
-  /** Assign priority to a message (higher = more important to keep) */
+  // ─── Message Priorities (Semantic) ──────────────────────────────
+  /**
+   * Assign priority to a message based on semantic content analysis.
+   * This is much smarter than the v1 version that only looked at role.
+   */
   messagePriority(msg) {
+    const text = this.extractText(msg).toLowerCase();
+    let priority = 20;
     if (msg.role === "system") return 100;
-    if (msg.role === "user") return 80;
-    if (msg.role === "assistant") return 60;
-    return 20;
+    if (msg.role === "user") priority = 70;
+    if (/\b(error|fail|exception|bug|wrong|incorrect|doesn'?t work|not found)\b/.test(text)) {
+      priority += 25;
+    }
+    if (/\b(i want|use|don'?t use|prefer|always|never|must|should|please)\b/.test(text)) {
+      priority += 20;
+    }
+    if (/\b(it|that|this|the above|previous|earlier|just|recently)\b/.test(text)) {
+      priority += 15;
+    }
+    if (msg.role === "assistant" && text.length > 100) {
+      priority += 10;
+    }
+    if (/[\d]+\.[\d]+|\/[\w/]+\.[\w]+|localhost|0\.0\.0\.0|=\s*["']/.test(text)) {
+      priority += 10;
+    }
+    return Math.min(priority, 100);
   }
-  // ─── Private Helpers ─────────────────────────────────────────────
+  // ─── Private: Annotation ─────────────────────────────────────────
+  /** Annotate messages with semantic metadata for smarter compression */
+  annotateMessages(messages) {
+    let turnGroup = 0;
+    let lastUserRole = -1;
+    return messages.map((msg, index) => {
+      const text = this.extractText(msg);
+      if (msg.role === "user" && index > lastUserRole) {
+        turnGroup++;
+        lastUserRole = index;
+      }
+      return {
+        msg,
+        index,
+        tokenEstimate: this.estimateTextTokens(text) + 4,
+        priority: this.messagePriority(msg),
+        hasReference: /\b(it|that|this|the above|previous|earlier)\b/i.test(text),
+        isToolResult: text.startsWith("[Tool") || msg.role === "tool",
+        turnGroup
+      };
+    });
+  }
+  // ─── Private: Semantic Key Message Extraction ────────────────────
+  /**
+   * Extract key messages using semantic annotations.
+   * Much smarter than v1 — preserves error info, pronoun references, and user decisions.
+   */
+  extractKeyMessages(annotated) {
+    const HIGH_PRIORITY_THRESHOLD = 60;
+    const MAX_TOOL_RESULT_LEN = 500;
+    const kept = [];
+    const dropped = [];
+    for (const am of annotated) {
+      if (am.priority >= HIGH_PRIORITY_THRESHOLD) {
+        kept.push(am);
+      } else if (am.isToolResult && am.tokenEstimate < MAX_TOOL_RESULT_LEN) {
+        kept.push(am);
+      } else {
+        dropped.push(am);
+      }
+    }
+    if (dropped.length > annotated.length * 0.5) {
+      dropped.filter((am) => am.priority >= 40).sort((a, b) => b.priority - a.priority).slice(0, Math.ceil(annotated.length * 0.2)).forEach((am) => kept.push(am));
+    }
+    kept.sort((a, b) => a.index - b.index);
+    return kept.map((am) => {
+      if (am.isToolResult && am.tokenEstimate > MAX_TOOL_RESULT_LEN) {
+        const text = this.extractText(am.msg);
+        return {
+          ...am.msg,
+          content: `[Tool Result Summary]: ${text.slice(0, MAX_TOOL_RESULT_LEN)}...`
+        };
+      }
+      return am.msg;
+    });
+  }
+  /** Alias for backward compat */
+  extractKeyMessagesSemantic = this.extractKeyMessages;
+  // ─── Private: Summarization ──────────────────────────────────────
+  /**
+   * Summarize a block of messages.
+   * Strategy:
+   * 1. If external summarizer provided, use it
+   * 2. Otherwise, try using the Agent's own LLM (via router) for auto-summarization
+   * 3. If neither works, fall back to semantic extraction
+   */
+  async summarizeBlock(messages, externalSummarizer) {
+    if (messages.length === 0) return null;
+    if (externalSummarizer) {
+      const text = this.formatMessagesForSummary(messages);
+      const summary = await externalSummarizer(text);
+      return this.buildSummaryMessage(summary);
+    }
+    try {
+      const provider = this.router.getDefault();
+      const text = this.formatMessagesForSummary(messages);
+      const result = await (0, import_ai.generateText)({
+        model: provider.model,
+        system: `You are a conversation compressor. Summarize the following conversation history into a concise summary that:
+1. Preserves all user decisions, preferences, and instructions
+2. Resolves pronouns (replace "it", "that" with the actual referent)
+3. Keeps error messages and their resolutions
+4. Notes any file paths, config values, or specific technical details
+5. Tracks the sequence of actions taken
+Be concise but complete. Use bullet points for clarity.`,
+        prompt: text,
+        maxTokens: 1e3
+      });
+      return this.buildSummaryMessage(result.text);
+    } catch {
+      return null;
+    }
+  }
+  /** Format messages for summarization input */
+  formatMessagesForSummary(messages) {
+    return messages.map((m) => {
+      const content = this.extractText(m);
+      const truncated = content.length > 3e3 ? content.slice(0, 1500) + "\n...[truncated]...\n" + content.slice(-1500) : content;
+      return `[${m.role}]: ${truncated}`;
+    }).join("\n\n");
+  }
+  /** Build a summary message with standard format */
+  buildSummaryMessage(summary) {
+    return {
+      role: "system",
+      content: `[Conversation Summary \u2014 earlier context compressed]
+${summary}`
+    };
+  }
+  // ─── Private: Message Splitting ──────────────────────────────────
   /** Split messages at the N-th most recent turn boundary */
   splitMessages(messages, preserveRecent) {
     let turnCount = 0;
@@ -168,33 +418,6 @@ var ContextManager = class {
       }
     }
     return [messages.slice(splitIndex), messages.slice(0, splitIndex)];
-  }
-  /** Summarize a block of older messages using LLM */
-  async summarizeMessages(messages, summarizer) {
-    const text = messages.map((m) => {
-      const content = this.extractText(m);
-      return `[${m.role}]: ${content}`;
-    }).join("\n");
-    const summary = await summarizer(text);
-    return {
-      role: "system",
-      content: `[Conversation Summary]
-${summary}`
-    };
-  }
-  /** Extract key messages (user + assistant, compress tool results) */
-  extractKeyMessages(messages) {
-    return messages.map((msg) => {
-      const text = this.extractText(msg);
-      if (msg.role === "system" || msg.role === "user") return msg;
-      if (msg.role === "assistant") {
-        return text.trim() ? msg : null;
-      }
-      return {
-        role: "user",
-        content: `[Tool Output]: ${this.truncateToolOutput(text)}`
-      };
-    }).filter(Boolean);
   }
   /** Extract plain text from a message */
   extractText(msg) {
@@ -330,10 +553,140 @@ var PROVIDER_PRICING = {
   "anthropic-haiku35": { inputPer1M: 0.8, outputPer1M: 4 }
 };
 function getPricing(providerId) {
-  return PROVIDER_PRICING[providerId] ?? PROVIDER_PRICING["openai-gpt4o"];
+  return PROVIDER_PRICING[providerId] ?? PROVIDER_PRICING[providerId.split(":")[0]] ?? PROVIDER_PRICING["openai-gpt4o"];
 }
 
 // src/logger.ts
+var LEVEL_PRIORITY = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3
+};
+var StructuredLogger = class {
+  logs = [];
+  minLevel;
+  consoleOutput;
+  filePath;
+  maxFileSize;
+  maxFiles;
+  samplingRate;
+  traceId;
+  writeQueue = Promise.resolve();
+  logCounts = { debug: 0, info: 0, warn: 0, error: 0 };
+  constructor(config) {
+    this.minLevel = config?.minLevel ?? "info";
+    this.consoleOutput = config?.console ?? process.env.NODE_ENV !== "production";
+    this.filePath = config?.filePath;
+    this.maxFileSize = config?.maxFileSize ?? 10 * 1024 * 1024;
+    this.maxFiles = config?.maxFiles ?? 3;
+    this.samplingRate = config?.samplingRate ?? 1;
+    this.traceId = config?.traceId;
+  }
+  debug(message, data) {
+    this.log("debug", message, data);
+  }
+  info(message, data) {
+    this.log("info", message, data);
+  }
+  warn(message, data) {
+    this.log("warn", message, data);
+  }
+  error(message, data) {
+    this.log("error", message, data);
+  }
+  log(level, message, data) {
+    if (LEVEL_PRIORITY[level] < LEVEL_PRIORITY[this.minLevel]) return;
+    if (level === "debug" || level === "info") {
+      this.logCounts[level]++;
+      if (this.samplingRate > 1 && this.logCounts[level] % this.samplingRate !== 1) return;
+    }
+    const entry = {
+      level,
+      timestamp: Date.now(),
+      message,
+      data,
+      traceId: this.traceId
+    };
+    this.logs.push(entry);
+    const ts = new Date(entry.timestamp).toISOString().slice(11, 23);
+    const prefix = `[${level.toUpperCase()}]`;
+    const dataStr = data ? ` ${JSON.stringify(data)}` : "";
+    const output = `${prefix} ${ts} ${message}${dataStr}`;
+    if (this.consoleOutput) {
+      switch (level) {
+        case "error":
+          console.error(output);
+          break;
+        case "warn":
+          console.warn(output);
+          break;
+        default:
+          console.log(output);
+      }
+    }
+    if (this.filePath) {
+      this.writeQueue = this.writeQueue.then(() => this.writeToFile(entry)).catch(() => {
+      });
+    }
+  }
+  async writeToFile(entry) {
+    if (!this.filePath) return;
+    const { appendFile, stat, rename } = await import("fs/promises");
+    const { existsSync: existsSync2 } = await import("fs");
+    try {
+      if (existsSync2(this.filePath)) {
+        const stats = await stat(this.filePath);
+        if (stats.size >= this.maxFileSize) {
+          await this.rotateLogs();
+        }
+      }
+    } catch {
+    }
+    const line = JSON.stringify(entry) + "\n";
+    try {
+      await appendFile(this.filePath, line, "utf-8");
+    } catch {
+      const { mkdir: mkdir2 } = await import("fs/promises");
+      const { dirname: dirname2 } = await import("path");
+      await mkdir2(dirname2(this.filePath), { recursive: true });
+      await appendFile(this.filePath, line, "utf-8");
+    }
+  }
+  async rotateLogs() {
+    if (!this.filePath) return;
+    const { rename, unlink } = await import("fs/promises");
+    const { existsSync: existsSync2 } = await import("fs");
+    const oldest = `${this.filePath}.${this.maxFiles}`;
+    if (existsSync2(oldest)) await unlink(oldest).catch(() => {
+    });
+    for (let i = this.maxFiles - 1; i >= 1; i--) {
+      const from = `${this.filePath}.${i}`;
+      const to = `${this.filePath}.${i + 1}`;
+      if (existsSync2(from)) await rename(from, to).catch(() => {
+      });
+    }
+    await rename(this.filePath, `${this.filePath}.1`).catch(() => {
+    });
+  }
+  /** Get all logs (in-memory) */
+  getLogs(level) {
+    if (level) return this.logs.filter((l) => l.level === level);
+    return this.logs;
+  }
+  /** Export as newline-delimited JSON */
+  exportNDJSON() {
+    return this.logs.map((l) => JSON.stringify(l)).join("\n");
+  }
+  /** Clear in-memory logs */
+  clear() {
+    this.logs = [];
+  }
+  /** Set trace ID */
+  setTraceId(id) {
+    this.traceId = id;
+  }
+};
 var ConsoleToolLogger = class {
   constructor(prefix = "AgentNova") {
     this.prefix = prefix;
@@ -458,73 +811,37 @@ var TraceReplay = class {
     return JSON.stringify(this.trace, null, 2);
   }
 };
-var StructuredLogger = class {
-  logs = [];
-  minLevel;
-  traceId;
-  levelPriority = {
-    debug: 0,
-    info: 1,
-    warn: 2,
-    error: 3
-  };
-  constructor(options) {
-    this.minLevel = options?.minLevel ?? "info";
-    this.traceId = options?.traceId;
+
+// src/skill-worker.ts
+var SkillLoaderWorker = class {
+  skills = [];
+  async loadAll(dirs) {
+    const { SkillLoader } = await import("@agentnova/skills");
+    const loader = new SkillLoader();
+    const loaded = await loader.loadAll(dirs);
+    this.skills = loaded.map((s) => ({
+      name: s.name,
+      tools: s.tools ?? [],
+      prompt: s.prompt ?? "",
+      active: s.active,
+      activateOn: s.activateOn
+    }));
   }
-  debug(message, data) {
-    this.log("debug", message, data);
-  }
-  info(message, data) {
-    this.log("info", message, data);
-  }
-  warn(message, data) {
-    this.log("warn", message, data);
-  }
-  error(message, data) {
-    this.log("error", message, data);
-  }
-  log(level, message, data) {
-    if (this.levelPriority[level] < this.levelPriority[this.minLevel]) return;
-    const entry = {
-      level,
-      timestamp: Date.now(),
-      message,
-      data,
-      traceId: this.traceId
-    };
-    this.logs.push(entry);
-    const prefix = `[${level.toUpperCase()}]`;
-    const ts = new Date(entry.timestamp).toISOString().slice(11, 23);
-    const dataStr = data ? ` ${JSON.stringify(data)}` : "";
-    const output = `${prefix} ${ts} ${message}${dataStr}`;
-    switch (level) {
-      case "error":
-        console.error(output);
-        break;
-      case "warn":
-        console.warn(output);
-        break;
-      default:
-        console.log(output);
+  activateForInput(input) {
+    const activated = [];
+    for (const skill of this.skills) {
+      if (skill.activateOn?.(input) && !skill.active) {
+        skill.active = true;
+        activated.push(skill);
+      }
     }
+    return activated;
   }
-  /** Get all logs */
-  getLogs(level) {
-    if (level) return this.logs.filter((l) => l.level === level);
-    return this.logs;
+  getActiveTools() {
+    return this.skills.filter((s) => s.active).flatMap((s) => s.tools);
   }
-  /** Export logs as newline-delimited JSON */
-  exportNDJSON() {
-    return this.logs.map((l) => JSON.stringify(l)).join("\n");
-  }
-  /** Clear logs */
-  clear() {
-    this.logs = [];
-  }
-  /** Set trace ID for correlation */
-  setTraceId(id) {
-    this.traceId = id;
+  getActivePrompts() {
+    return this.skills.filter((s) => s.active && s.prompt).map((s) => s.prompt);
   }
 };
 
@@ -551,6 +868,7 @@ var Agent = class {
   projectMemory;
   longTermMemory;
   memoryInjector;
+  projectMemoryReady = Promise.resolve();
   // Skills
   skills;
   skillDirs;
@@ -579,7 +897,8 @@ var Agent = class {
     this.logger = new StructuredLogger({ traceId: this.tracer["traceId"] });
     this.workingMemory = new import_memory.WorkingMemory();
     this.projectMemory = new import_memory.ProjectMemory(this.workingDir);
-    this.projectMemory.load();
+    this.projectMemoryReady = this.projectMemory.load().catch(() => {
+    });
     if (config.longTermMemory) {
       this.longTermMemory = new import_memory.LongTermMemory(config.longTermMemory);
     }
@@ -653,8 +972,14 @@ var Agent = class {
         }
         await this.injectMemories(prompt);
         if (this.contextMgr.needsCompression(this.messages)) {
-          this.messages = await this.contextMgr.compress(this.messages);
-          this.emit("context:compressed", { step: this.state.step });
+          const compressed = await this.contextMgr.compressWithMeta(this.messages);
+          this.messages = compressed.messages;
+          this.emit("context:compressed", {
+            step: this.state.step,
+            originalTokens: compressed.originalTokenCount,
+            compressedTokens: compressed.compressedTokenCount,
+            strategy: compressed.strategy
+          });
         }
         const shouldContinue = await this.executeStep(options);
         if (!shouldContinue) break;
@@ -690,8 +1015,14 @@ var Agent = class {
         }
         await this.injectMemories(prompt);
         if (this.contextMgr.needsCompression(this.messages)) {
-          this.messages = await this.contextMgr.compress(this.messages);
-          this.emit("context:compressed", { step: this.state.step });
+          const compressed = await this.contextMgr.compressWithMeta(this.messages);
+          this.messages = compressed.messages;
+          this.emit("context:compressed", {
+            step: this.state.step,
+            originalTokens: compressed.originalTokenCount,
+            compressedTokens: compressed.compressedTokenCount,
+            strategy: compressed.strategy
+          });
         }
         const shouldContinue = await this.executeStepStreaming(options);
         if (!shouldContinue) break;
@@ -699,9 +1030,13 @@ var Agent = class {
       return this.buildResult();
     } catch (err) {
       if (err instanceof ResourceLimitError) {
+        this.emit("agent:error", { error: err.message, step: this.state.step });
         return this.buildResult();
       }
-      throw err;
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit("agent:error", { error: error.message, step: this.state.step });
+      await this.runHook("onError", { agentState: this.state, step: this.state.step });
+      throw error;
     }
   }
   registerTool(tool) {
@@ -741,13 +1076,19 @@ var Agent = class {
     await this.memoryInjector.store(key, content, { layer });
   }
   // ─── Memory Injection ────────────────────────────────────────────
+  memoryMessageIdx = -1;
   async injectMemories(prompt) {
-    const memoryContext = await this.memoryInjector.inject(prompt, 5);
+    const budget = this.contextMgr.calculateMemoryBudget(this.messages, 5);
+    const memoryContext = await this.memoryInjector.inject(prompt, 5, {
+      maxItemLength: budget.maxItemLength,
+      remaining: budget.budgetRemaining
+    });
     if (memoryContext) {
-      const sysIdx = this.messages.findIndex((m) => typeof m.content === "string" && m.content.includes("Project Memory"));
-      if (sysIdx >= 0) {
+      if (this.memoryMessageIdx >= 0 && this.memoryMessageIdx < this.messages.length) {
+        this.messages[this.memoryMessageIdx] = { role: "system", content: memoryContext };
       } else {
         this.messages.splice(1, 0, { role: "system", content: memoryContext });
+        this.memoryMessageIdx = 1;
       }
     }
     const active = this.skills.activateForInput(prompt);
@@ -771,14 +1112,62 @@ var Agent = class {
     let lastError;
     for (const provider of fallbackChain) {
       try {
-        const result = await (0, import_ai.generateText)({
+        const result = await (0, import_ai2.generateText)({
           model: provider.model,
           system: this.systemPrompt,
           messages: this.messages.slice(1),
           tools: aiTools,
+          maxSteps: 1,
           abortSignal: options?.signal
         });
-        return this.processStepResult(result.text, result.toolCalls, result.usage, stepStart, options);
+        if (result.usage) {
+          this.usage.recordTokens(result.usage.promptTokens ?? 0, result.usage.completionTokens ?? 0);
+          this.state.totalTokensUsed = this.usage.totalTokens;
+          this.state.totalCost = this.usage.estimatedCost;
+        }
+        await this.runHook("onAfterLLMCall", { agentState: this.state, step: this.state.step, messages: this.messages });
+        this.emit("llm:response", { step: this.state.step, tokensUsed: result.usage?.totalTokens });
+        const stepInfo = {
+          step: this.state.step,
+          text: result.text || void 0,
+          durationMs: Date.now() - stepStart,
+          tokensUsed: result.usage ? { input: result.usage.promptTokens ?? 0, output: result.usage.completionTokens ?? 0 } : void 0
+        };
+        if (result.steps && result.steps.length > 0) {
+          for (const sdkStep of result.steps) {
+            if (sdkStep.toolCalls?.length) {
+              stepInfo.toolCalls = sdkStep.toolCalls.map((tc) => ({ tool: tc.toolName, args: tc.args }));
+            }
+            if (sdkStep.toolResults?.length) {
+              stepInfo.toolResults = sdkStep.toolResults.map((tr) => {
+                const trAny = tr;
+                return {
+                  tool: trAny.toolName ?? trAny.tool ?? "unknown",
+                  output: trAny.result ?? trAny.output,
+                  error: trAny.error,
+                  durationMs: 0,
+                  approved: true
+                };
+              });
+            }
+          }
+        } else if (result.toolCalls && result.toolCalls.length > 0) {
+          stepInfo.toolCalls = result.toolCalls.map((tc) => ({ tool: tc.toolName, args: tc.args }));
+        }
+        if (result.response?.messages && result.response.messages.length > 0) {
+          this.messages = [this.messages[0], ...result.response.messages];
+          if (this.memoryMessageIdx >= 0) {
+            this.memoryMessageIdx = 1;
+          }
+        } else {
+          if (result.text) this.messages.push({ role: "assistant", content: result.text });
+        }
+        this.steps.push(stepInfo);
+        this.usage.recordStep();
+        this.state.step++;
+        if (options?.onStep) options.onStep(stepInfo);
+        this.emit("step", { step: this.state.step });
+        return !!(result.toolCalls?.length || result.steps?.some((s) => s.toolCalls?.length));
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         if (!this.router.shouldFallback(err)) throw lastError;
@@ -796,28 +1185,67 @@ var Agent = class {
     let lastError;
     for (const provider of fallbackChain) {
       try {
-        const streamResults = (0, import_ai.streamText)({
+        const streamResults = (0, import_ai2.streamText)({
           model: provider.model,
           system: this.systemPrompt,
           messages: this.messages.slice(1),
           tools: aiTools,
+          maxSteps: 1,
           abortSignal: options?.signal
         });
-        const consumed = await streamResults;
         let fullText = "";
-        for await (const chunk of consumed.textStream) {
+        for await (const chunk of (await streamResults).textStream) {
           fullText += chunk;
           if (options?.onText) options.onText(chunk);
         }
-        const finalText = typeof consumed.text === "string" ? consumed.text : fullText;
-        const finalToolCalls = Array.isArray(consumed.toolCalls) ? consumed.toolCalls : [];
-        return this.processStepResult(
-          finalText || void 0,
-          finalToolCalls,
-          consumed.usage,
-          stepStart,
-          options
-        );
+        const consumed = await streamResults;
+        const finalUsage = await consumed.usage;
+        if (finalUsage) {
+          this.usage.recordTokens(finalUsage.promptTokens ?? 0, finalUsage.completionTokens ?? 0);
+          this.state.totalTokensUsed = this.usage.totalTokens;
+          this.state.totalCost = this.usage.estimatedCost;
+        }
+        await this.runHook("onAfterLLMCall", { agentState: this.state, step: this.state.step, messages: this.messages });
+        this.emit("llm:response", { step: this.state.step, tokensUsed: finalUsage?.totalTokens });
+        const stepInfo = {
+          step: this.state.step,
+          text: fullText || void 0,
+          durationMs: Date.now() - stepStart,
+          tokensUsed: finalUsage ? { input: finalUsage.promptTokens ?? 0, output: finalUsage.completionTokens ?? 0 } : void 0
+        };
+        const stepsData = consumed.steps;
+        if (stepsData?.length) {
+          for (const sdkStep of stepsData) {
+            if (sdkStep.toolCalls?.length) {
+              stepInfo.toolCalls = sdkStep.toolCalls.map((tc) => ({ tool: tc.toolName, args: tc.args }));
+            }
+            if (sdkStep.toolResults?.length) {
+              stepInfo.toolResults = sdkStep.toolResults.map((tr) => ({
+                tool: tr.toolName ?? "unknown",
+                output: tr.result ?? tr.output,
+                error: tr.error,
+                durationMs: 0,
+                approved: true
+              }));
+            }
+          }
+        }
+        const responseMsgs = consumed.response?.messages;
+        if (responseMsgs?.length) {
+          this.messages = [this.messages[0], ...responseMsgs];
+          if (this.memoryMessageIdx >= 0) {
+            this.memoryMessageIdx = 1;
+          }
+        } else if (fullText) {
+          this.messages.push({ role: "assistant", content: fullText });
+        }
+        this.steps.push(stepInfo);
+        this.usage.recordStep();
+        this.state.step++;
+        if (options?.onStep) options.onStep(stepInfo);
+        this.emit("step", { step: this.state.step });
+        const hasToolCalls = stepsData?.some((s) => s.toolCalls?.length) ?? consumed.toolCalls?.length > 0;
+        return !!hasToolCalls;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         if (!this.router.shouldFallback(err)) throw lastError;
@@ -825,47 +1253,6 @@ var Agent = class {
       }
     }
     throw lastError ?? new Error("All providers failed");
-  }
-  async processStepResult(text, toolCalls, usage, stepStart, options) {
-    const stepDuration = Date.now() - stepStart;
-    if (usage) {
-      this.usage.recordTokens(usage.promptTokens ?? 0, usage.completionTokens ?? 0);
-      this.state.totalTokensUsed = this.usage.totalTokens;
-      this.state.totalCost = this.usage.estimatedCost;
-    }
-    await this.runHook("onAfterLLMCall", { agentState: this.state, step: this.state.step, messages: this.messages });
-    this.emit("llm:response", { step: this.state.step, tokensUsed: usage?.totalTokens });
-    const stepInfo = {
-      step: this.state.step,
-      text: text || void 0,
-      durationMs: stepDuration,
-      tokensUsed: usage ? { input: usage.promptTokens ?? 0, output: usage.completionTokens ?? 0 } : void 0
-    };
-    if (toolCalls && toolCalls.length > 0) {
-      const toolResults = [];
-      stepInfo.toolCalls = toolCalls.map((tc) => ({ tool: tc.toolName, args: tc.args }));
-      for (const tc of toolCalls) {
-        const call = { tool: tc.toolName, args: tc.args };
-        const tr = await this.executeToolCall(call, options?.signal);
-        toolResults.push(tr);
-      }
-      stepInfo.toolResults = toolResults;
-      this.messages.push({ role: "assistant", content: text ?? "" });
-      for (const tr of toolResults) {
-        this.messages.push({
-          role: "user",
-          content: `[Tool: ${tr.tool}] ${tr.error ? `Error: ${tr.error}` : JSON.stringify(tr.output)}`
-        });
-      }
-    } else {
-      if (text) this.messages.push({ role: "assistant", content: text });
-    }
-    this.steps.push(stepInfo);
-    this.usage.recordStep();
-    this.state.step++;
-    if (options?.onStep) options.onStep(stepInfo);
-    this.emit("step", { step: this.state.step });
-    return !!toolCalls?.length;
   }
   async executeToolCall(call, signal) {
     const toolDef = this.registry.get(call.tool);
@@ -894,7 +1281,7 @@ var Agent = class {
       (req) => this.guard.check(req)
     );
     const toolResult = await this.engine.execute(call, toolCtx);
-    if (toolResult.output) toolResult.output = this.contextMgr.truncateToolOutput(toolResult.output);
+    if (toolResult.output) toolResult.output = this.contextMgr.truncateToolOutput(toolResult.output, this.messages);
     this.emit("tool:result", { tool: call.tool, result: toolResult });
     await this.runHook("onAfterToolCall", { agentState: this.state, step: this.state.step, toolCall: call, toolResult });
     return toolResult;
@@ -914,6 +1301,7 @@ var Agent = class {
     };
   }
   async resetState(prompt) {
+    await this.projectMemoryReady;
     this.state = this.createInitialState();
     this.steps = [];
     this.messages = [{ role: "system", content: await this.buildSystemPrompt() }];
@@ -921,6 +1309,8 @@ var Agent = class {
     this.usage.reset();
     this.guard.resetAllowAlways();
     this.contextMgr.adaptToProvider();
+    this.tracer.reset();
+    this.memoryMessageIdx = -1;
   }
   // ─── Private Helpers ─────────────────────────────────────────────
   buildAITools() {
@@ -934,7 +1324,12 @@ var Agent = class {
         tools[toolDef.name] = {
           description: toolDef.description,
           parameters: toolDef.parameters,
-          execute: async (args) => args
+          execute: async (args) => {
+            const call = { tool: toolDef.name, args };
+            const result = await this.executeToolCall(call);
+            if (result.error) return { error: result.error };
+            return result.output;
+          }
         };
       }
     }
@@ -986,53 +1381,392 @@ var Agent = class {
 function createAgent(config) {
   return new Agent(config);
 }
-var SkillLoaderWorker = class {
-  skills = [];
-  async loadAll(dirs) {
-    const { SkillLoader } = await import("@agentnova/skills");
-    const loader = new SkillLoader();
-    const loaded = await loader.loadAll(dirs);
-    this.skills = loaded.map((s) => ({
-      name: s.name,
-      tools: s.tools ?? [],
-      prompt: s.prompt ?? "",
-      active: s.active,
-      activateOn: s.activateOn
-    }));
+
+// src/errors.ts
+var RETRY_STRATEGY = {
+  // Provider — most are retryable
+  PROVIDER_TIMEOUT: "backoff",
+  PROVIDER_RATE_LIMIT: "after_cooldown",
+  PROVIDER_AUTH: "never",
+  PROVIDER_QUOTA: "after_cooldown",
+  PROVIDER_MODEL_NOT_FOUND: "never",
+  PROVIDER_SERVER_ERROR: "backoff",
+  PROVIDER_NETWORK: "backoff",
+  // Tool — some retryable
+  TOOL_NOT_FOUND: "never",
+  TOOL_VALIDATION: "never",
+  TOOL_PERMISSION_DENIED: "never",
+  TOOL_EXECUTION: "never",
+  TOOL_TIMEOUT: "backoff",
+  TOOL_ABORTED: "never",
+  // Memory — generally not retryable
+  MEMORY_STORAGE: "backoff",
+  MEMORY_NOT_FOUND: "never",
+  MEMORY_CORRUPTION: "never",
+  // Context
+  CONTEXT_OVERFLOW: "immediate",
+  CONTEXT_COMPRESSION_FAILED: "never",
+  // Limits — not retryable (need user action)
+  LIMIT_STEPS: "never",
+  LIMIT_TOKENS: "never",
+  LIMIT_TOOL_CALLS: "never",
+  LIMIT_TIMEOUT: "never",
+  LIMIT_COST: "never",
+  // Session
+  SESSION_CONCURRENT: "after_cooldown",
+  SESSION_NOT_FOUND: "never",
+  SESSION_CORRUPTION: "never",
+  // Config
+  CONFIG_INVALID: "never",
+  CONFIG_MISSING: "never"
+};
+var AgentError = class _AgentError extends Error {
+  code;
+  retry;
+  cause;
+  context;
+  timestamp;
+  constructor(options) {
+    super(options.message);
+    this.name = "AgentError";
+    this.code = options.code;
+    this.retry = RETRY_STRATEGY[options.code];
+    this.cause = options.cause;
+    this.context = options.context ?? {};
+    this.timestamp = Date.now();
   }
-  activateForInput(input) {
-    const active = [];
-    for (const skill of this.skills) {
-      if (skill.activateOn) {
-        if (skill.activateOn(input)) {
-          if (!skill.active) {
-            skill.active = true;
-            active.push(skill);
-          }
-        }
+  /** Check if this error is retryable */
+  get retryable() {
+    return this.retry !== "never";
+  }
+  /** Get recommended delay before retry (ms) */
+  get retryDelayMs() {
+    switch (this.retry) {
+      case "immediate":
+        return 0;
+      case "backoff":
+        return 1e3 + Math.random() * 2e3;
+      case "after_cooldown":
+        return 3e4 + Math.random() * 3e4;
+      default:
+        return Infinity;
+    }
+  }
+  /** Serialize for logging/persistence */
+  toJSON() {
+    return {
+      name: this.name,
+      code: this.code,
+      message: this.message,
+      retry: this.retry,
+      retryable: this.retryable,
+      context: this.context,
+      timestamp: this.timestamp,
+      cause: this.cause?.message
+    };
+  }
+  /** Create from an unknown thrown value */
+  static from(err, code) {
+    if (err instanceof _AgentError) return err;
+    if (err instanceof Error) {
+      return new _AgentError({
+        code: code ?? inferCode(err),
+        message: err.message,
+        cause: err
+      });
+    }
+    return new _AgentError({
+      code: code ?? "TOOL_EXECUTION",
+      message: String(err)
+    });
+  }
+};
+function inferCode(err) {
+  const msg = err.message.toLowerCase();
+  if (/timeout|timed out|etimedout/i.test(msg)) return "PROVIDER_TIMEOUT";
+  if (/429|rate limit|too many requests/i.test(msg)) return "PROVIDER_RATE_LIMIT";
+  if (/401|403|unauthorized|forbidden|invalid api key/i.test(msg)) return "PROVIDER_AUTH";
+  if (/402|quota|billing|insufficient/i.test(msg)) return "PROVIDER_QUOTA";
+  if (/404|model not found|does not exist/i.test(msg)) return "PROVIDER_MODEL_NOT_FOUND";
+  if (/500|502|503|internal server|service unavailable/i.test(msg)) return "PROVIDER_SERVER_ERROR";
+  if (/econnrefused|enotfound|network|fetch failed/i.test(msg)) return "PROVIDER_NETWORK";
+  if (/unknown tool|tool not found/i.test(msg)) return "TOOL_NOT_FOUND";
+  if (/invalid input|validation|parse/i.test(msg)) return "TOOL_VALIDATION";
+  if (/permission denied|not allowed/i.test(msg)) return "TOOL_PERMISSION_DENIED";
+  if (/abort/i.test(msg)) return "TOOL_ABORTED";
+  if (/max steps|maxstep/i.test(msg)) return "LIMIT_STEPS";
+  if (/max token/i.test(msg)) return "LIMIT_TOKENS";
+  if (/timeout.*limit/i.test(msg)) return "LIMIT_TIMEOUT";
+  return "TOOL_EXECUTION";
+}
+function isRetryable(err) {
+  if (err instanceof AgentError) return err.retryable;
+  return true;
+}
+function getRetryDelay(err) {
+  if (err instanceof AgentError) return err.retryDelayMs;
+  const code = inferCode(err instanceof Error ? err : new Error(String(err)));
+  return RETRY_STRATEGY[code] === "never" ? Infinity : 2e3;
+}
+function wrapProviderError(err, providerId) {
+  return AgentError.from(err, inferCode(err instanceof Error ? err : new Error(String(err))));
+}
+function toolError(tool, message, cause) {
+  return new AgentError({
+    code: "TOOL_EXECUTION",
+    message: `Tool "${tool}" failed: ${message}`,
+    cause,
+    context: { tool }
+  });
+}
+
+// src/session.ts
+var import_promises = require("fs/promises");
+var import_fs = require("fs");
+var import_path = require("path");
+var DEFAULT_SESSION_CONFIG = {
+  storageDir: "./sessions",
+  persist: true,
+  autoSaveIntervalMs: 3e4,
+  maxConcurrentPerUser: 1
+};
+var UserSession = class _UserSession {
+  userId;
+  sessionId;
+  messages = [];
+  state;
+  createdAt;
+  updatedAt;
+  metadata = {};
+  /** Queue of pending runs — ensures serial execution per user */
+  runQueue = [];
+  running = false;
+  constructor(userId, sessionId) {
+    this.userId = userId;
+    this.sessionId = sessionId ?? `sess_${userId}_${Date.now()}`;
+    this.state = this.createInitialState();
+    this.createdAt = Date.now();
+    this.updatedAt = Date.now();
+  }
+  /** Acquire run lock — returns a release function */
+  async acquire() {
+    if (!this.running) {
+      this.running = true;
+      return () => this.release();
+    }
+    return new Promise((resolve) => {
+      this.runQueue.push(() => {
+        this.running = true;
+        resolve(() => this.release());
+      });
+    });
+  }
+  release() {
+    this.running = false;
+    this.updatedAt = Date.now();
+    const next = this.runQueue.shift();
+    if (next) next();
+  }
+  createInitialState() {
+    return {
+      step: 0,
+      totalTokensUsed: 0,
+      totalCost: 0,
+      startTime: Date.now(),
+      toolCallCount: 0,
+      aborted: false,
+      messages: []
+    };
+  }
+  resetState() {
+    this.state = this.createInitialState();
+    this.messages = [];
+    this.updatedAt = Date.now();
+  }
+  toData() {
+    return {
+      sessionId: this.sessionId,
+      userId: this.userId,
+      messages: [...this.messages],
+      state: { ...this.state },
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
+      metadata: { ...this.metadata }
+    };
+  }
+  static fromData(data) {
+    const sess = new _UserSession(data.userId, data.sessionId);
+    sess.messages = data.messages;
+    sess.state = data.state;
+    sess.createdAt = data.createdAt;
+    sess.updatedAt = data.updatedAt;
+    sess.metadata = data.metadata;
+    return sess;
+  }
+};
+var SessionManager = class {
+  sessions = /* @__PURE__ */ new Map();
+  // sessionId → UserSession
+  userIndex = /* @__PURE__ */ new Map();
+  // userId → sessionIds
+  config;
+  autoSaveTimer;
+  constructor(config) {
+    this.config = { ...DEFAULT_SESSION_CONFIG, ...config };
+    if (this.config.autoSaveIntervalMs > 0 && this.config.persist) {
+      this.autoSaveTimer = setInterval(() => this.saveAll(), this.config.autoSaveIntervalMs);
+    }
+  }
+  /** Create or get a session for a user */
+  createSession(userId, sessionId) {
+    const id = sessionId ?? `sess_${userId}_${Date.now()}`;
+    const existing = this.sessions.get(id);
+    if (existing) return existing;
+    const session = new UserSession(userId, id);
+    this.sessions.set(id, session);
+    if (!this.userIndex.has(userId)) {
+      this.userIndex.set(userId, /* @__PURE__ */ new Set());
+    }
+    this.userIndex.get(userId).add(id);
+    return session;
+  }
+  /** Get session by ID */
+  getSession(sessionId) {
+    return this.sessions.get(sessionId);
+  }
+  /** Get all sessions for a user */
+  getUserSessions(userId) {
+    const ids = this.userIndex.get(userId);
+    if (!ids) return [];
+    return Array.from(ids).map((id) => this.sessions.get(id)).filter((s) => s !== void 0);
+  }
+  /** Get or create the latest session for a user */
+  getLatestSession(userId) {
+    const sessions = this.getUserSessions(userId);
+    if (sessions.length === 0) return this.createSession(userId);
+    sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    return sessions[0];
+  }
+  /** Run a function with session lock (concurrent-safe) */
+  async withSession(userId, fn) {
+    const session = this.getLatestSession(userId);
+    const release = await session.acquire();
+    try {
+      const result = await fn(session);
+      if (this.config.persist) await this.saveSession(session);
+      return result;
+    } catch (err) {
+      if (this.config.persist) await this.saveSession(session);
+      throw err;
+    } finally {
+      release();
+    }
+  }
+  /** Delete a session */
+  async deleteSession(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.delete(sessionId);
+    const userSessions = this.userIndex.get(session.userId);
+    if (userSessions) {
+      userSessions.delete(sessionId);
+      if (userSessions.size === 0) this.userIndex.delete(session.userId);
+    }
+    if (this.config.persist) {
+      const filePath = this.getSessionPath(sessionId);
+      if ((0, import_fs.existsSync)(filePath)) {
+        const { unlink } = await import("fs/promises");
+        await unlink(filePath).catch(() => {
+        });
       }
     }
-    return active;
   }
-  getActiveTools() {
-    return this.skills.filter((s) => s.active).flatMap((s) => s.tools);
+  // ─── Persistence ─────────────────────────────────────────────────
+  /** Save a single session to disk */
+  async saveSession(session) {
+    if (!this.config.persist) return;
+    const filePath = this.getSessionPath(session.sessionId);
+    const dir = (0, import_path.dirname)(filePath);
+    if (!(0, import_fs.existsSync)(dir)) await (0, import_promises.mkdir)(dir, { recursive: true });
+    await (0, import_promises.writeFile)(filePath, JSON.stringify(session.toData(), null, 2), "utf-8");
   }
-  getActivePrompts() {
-    return this.skills.filter((s) => s.active && s.prompt).map((s) => s.prompt);
+  /** Save all active sessions */
+  async saveAll() {
+    if (!this.config.persist) return;
+    const saves = Array.from(this.sessions.values()).map((s) => this.saveSession(s).catch(() => {
+    }));
+    await Promise.all(saves);
+  }
+  /** Load a session from disk */
+  async loadSession(sessionId) {
+    const filePath = this.getSessionPath(sessionId);
+    if (!(0, import_fs.existsSync)(filePath)) return null;
+    try {
+      const data = await (0, import_promises.readFile)(filePath, "utf-8");
+      const parsed = JSON.parse(data);
+      const session = UserSession.fromData(parsed);
+      this.sessions.set(sessionId, session);
+      if (!this.userIndex.has(session.userId)) {
+        this.userIndex.set(session.userId, /* @__PURE__ */ new Set());
+      }
+      this.userIndex.get(session.userId).add(sessionId);
+      return session;
+    } catch {
+      throw new AgentError({
+        code: "SESSION_CORRUPTION",
+        message: `Session file corrupted: ${sessionId}`,
+        context: { sessionId }
+      });
+    }
+  }
+  /** Load all sessions from storage directory */
+  async loadAllSessions() {
+    if (!(0, import_fs.existsSync)(this.config.storageDir)) return 0;
+    const { readdir } = await import("fs/promises");
+    const files = await readdir(this.config.storageDir);
+    let loaded = 0;
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const sessionId = file.replace(".json", "");
+      try {
+        await this.loadSession(sessionId);
+        loaded++;
+      } catch {
+      }
+    }
+    return loaded;
+  }
+  /** Graceful shutdown — save all and stop timer */
+  async shutdown() {
+    if (this.autoSaveTimer) {
+      clearInterval(this.autoSaveTimer);
+      this.autoSaveTimer = void 0;
+    }
+    await this.saveAll();
+  }
+  getSessionPath(sessionId) {
+    return (0, import_path.join)(this.config.storageDir, `${sessionId}.json`);
   }
 };
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   Agent,
+  AgentError,
   ContextManager,
   DEFAULT_CONTEXT_CONFIG,
   PROVIDER_PRICING,
   ResourceLimitError,
+  SessionManager,
+  SkillLoaderWorker,
   StructuredLogger,
   TraceCollector,
   TraceReplay,
   UsageTracker,
   createAgent,
-  getPricing
+  getPricing,
+  getRetryDelay,
+  isRetryable,
+  toolError,
+  wrapProviderError
 });
 //# sourceMappingURL=index.cjs.map

@@ -139,7 +139,7 @@ export const PROVIDER_PRICING: Record<string, TokenPrice> = {
   'anthropic-haiku35': { inputPer1M: 0.8, outputPer1M: 4 },
 }
 
-/** Get pricing for a provider, fallback to GPT-4o pricing */
+/** Get pricing for a provider, supports provider:model exact match with provider fallback */
 export function getPricing(providerId: string): TokenPrice {
-  return PROVIDER_PRICING[providerId] ?? PROVIDER_PRICING['openai-gpt4o']
+  return PROVIDER_PRICING[providerId] ?? PROVIDER_PRICING[providerId.split(':')[0]] ?? PROVIDER_PRICING['openai-gpt4o']
 }

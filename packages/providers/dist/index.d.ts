@@ -54,6 +54,60 @@ declare class ProviderRouter {
 declare function createRouter(providers: ProviderConfig[], defaultId: string, fallbackChain?: string[]): ProviderRouter;
 
 /**
+ * Rate Limiter — token bucket + per-provider limits
+ *
+ * Strategies:
+ * 1. Global token bucket — caps total LPM (calls per minute) / TPM (tokens per minute)
+ * 2. Per-provider limits — respects each provider's rate limits
+ * 3. Adaptive backoff — auto-slows on 429 responses
+ */
+interface RateLimiterConfig {
+    /** Max API calls per minute globally (default: 60) */
+    callsPerMinute?: number;
+    /** Max tokens per minute globally (default: 100000) */
+    tokensPerMinute?: number;
+    /** Per-provider overrides: providerId → { callsPerMinute, tokensPerMinute } */
+    perProvider?: Record<string, {
+        callsPerMinute?: number;
+        tokensPerMinute?: number;
+    }>;
+    /** Backoff multiplier on 429 (default: 2) */
+    backoffMultiplier?: number;
+    /** Maximum backoff in ms (default: 60000) */
+    maxBackoffMs?: number;
+}
+declare class RateLimiter {
+    private globalCallBucket;
+    private globalTokenBucket;
+    private providerCallBuckets;
+    private providerTokenBuckets;
+    private config;
+    private providerBackoff;
+    constructor(config?: RateLimiterConfig);
+    /** Acquire permission to make an API call. Waits if rate limited. */
+    acquire(providerId: string, estimatedTokens: number): Promise<void>;
+    /** Report a 429 response — triggers adaptive backoff for this provider */
+    reportRateLimited(providerId: string, retryAfterMs?: number): void;
+    /** Reset backoff for a provider (on successful response) */
+    reportSuccess(providerId: string): void;
+    /** Get current bucket status for monitoring */
+    getStatus(): {
+        global: {
+            callsRemaining: number;
+            tokensRemaining: number;
+        };
+        providers: Record<string, {
+            callsRemaining: number;
+            tokensRemaining: number;
+            backoffMs: number;
+        }>;
+    };
+    private getProviderCallBucket;
+    private getProviderTokenBucket;
+    private sleep;
+}
+
+/**
  * Create an OpenAI-compatible provider config.
  * Works with OpenAI, DeepSeek, Qwen, or any OpenAI-compatible API.
  */
@@ -79,4 +133,4 @@ declare function claudeSonnet4(apiKey?: string): ProviderConfig;
 /** Preset: Anthropic Claude Haiku 3.5 */
 declare function claudeHaiku35(apiKey?: string): ProviderConfig;
 
-export { type ProviderConfig, type ProviderId, ProviderRouter, type RoutingConfig, type TaskComplexity, claudeHaiku35, claudeSonnet4, createOpenAICompatibleProvider, createRouter, deepseekChat, openaiGPT4o, qwenMax };
+export { type ProviderConfig, type ProviderId, ProviderRouter, RateLimiter, type RateLimiterConfig, type RoutingConfig, type TaskComplexity, claudeHaiku35, claudeSonnet4, createOpenAICompatibleProvider, createRouter, deepseekChat, openaiGPT4o, qwenMax };

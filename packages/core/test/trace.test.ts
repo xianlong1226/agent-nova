@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { TraceCollector, TraceReplay, StructuredLogger } from '../src/trace.js'
+import { TraceCollector, TraceReplay } from '../src/trace.js'
+import { StructuredLogger } from '../src/logger.js'
 import type { Trace } from '../src/trace.js'
 
 describe('TraceCollector', () => {

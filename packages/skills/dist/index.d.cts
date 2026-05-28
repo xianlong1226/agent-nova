@@ -79,6 +79,32 @@ declare class SkillRegistry {
     }): Promise<SkillManifest>;
     /** Uninstall a skill by name */
     uninstall(name: string): Promise<boolean>;
+    /**
+     * Publish a skill to a Git remote or npm registry
+     *
+     * Git mode:
+     *   1. Initialize git repo in skill dir (if not already)
+     *   2. Commit all files
+     *   3. Push to remote
+     *
+     * npm mode:
+     *   1. Generate package.json wrapper
+     *   2. Run npm publish
+     */
+    publish(name: string, options?: {
+        remote?: string;
+        registry?: string;
+        tag?: string;
+        dryRun?: boolean;
+    }): Promise<{
+        success: boolean;
+        message: string;
+        url?: string;
+    }>;
+    /** Push skill to a Git remote */
+    private publishToGit;
+    /** Publish skill as an npm package */
+    private publishToNpm;
 }
 
 export { type Skill, type SkillConfig, SkillLoader, type SkillManifest$1 as SkillManifest, SkillRegistry, defineSkill };

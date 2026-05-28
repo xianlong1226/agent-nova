@@ -1,0 +1,21 @@
+{
+  "name": "code-review.lint",
+  "description": "对指定文件运行 lint 检查，返回格式化的 lint 结果",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "files": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "要 lint 的文件路径列表"
+      },
+      "fix": {
+        "type": "boolean",
+        "description": "是否自动修复可修复的问题",
+        "default": false
+      }
+    },
+    "required": ["files"]
+  },
+  "permission": { "level": "read" }
+}
