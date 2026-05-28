@@ -11,10 +11,10 @@
 import {
   Agent,
   createRouter,
+  createOpenAICompatibleProvider,
   fsTools,
   shellTools,
 } from 'agentnova'
-import { createOpenAI } from '@ai-sdk/openai'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 
@@ -36,28 +36,39 @@ async function askApproval(req: { tool: string; args: Record<string, unknown>; p
 async function main() {
   // ─── 1. 配置多个 Provider ─────────────────────────────────
 
-  const deepseek = createOpenAI({
+  const deepseek = createOpenAICompatibleProvider({
+    id: 'deepseek',
+    name: 'DeepSeek',
+    model: 'deepseek-chat',
     baseURL: 'https://api.deepseek.com/v1',
     apiKey: process.env.DEEPSEEK_API_KEY,
+    costInputPer1M: 0.14,
+    costOutputPer1M: 0.28,
   })
 
-  const openai = createOpenAI({
+  const openai = createOpenAICompatibleProvider({
+    id: 'openai',
+    name: 'GPT-4o',
+    model: 'gpt-4o',
     apiKey: process.env.OPENAI_API_KEY,
+    costInputPer1M: 2.5,
+    costOutputPer1M: 10,
   })
 
-  const qwen = createOpenAI({
+  const qwen = createOpenAICompatibleProvider({
+    id: 'qwen',
+    name: 'Qwen Max',
+    model: 'qwen-max',
     baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     apiKey: process.env.QWEN_API_KEY,
+    costInputPer1M: 1.6,
+    costOutputPer1M: 6.4,
   })
 
   // ─── 2. 创建路由：按任务复杂度分流 ────────────────────────
 
   const router = createRouter(
-    [
-      { id: 'deepseek', model: deepseek('deepseek-chat'), name: 'DeepSeek', costInputPer1M: 0.14, costOutputPer1M: 0.28 },
-      { id: 'openai', model: openai('gpt-4o'), name: 'GPT-4o', costInputPer1M: 2.5, costOutputPer1M: 10 },
-      { id: 'qwen', model: qwen('qwen-max'), name: 'Qwen Max', costInputPer1M: 1.6, costOutputPer1M: 6.4 },
-    ],
+    [deepseek, openai, qwen],
     'deepseek',                    // 默认用 DeepSeek（最便宜）
     ['deepseek', 'qwen', 'openai'], // 降级链
   )

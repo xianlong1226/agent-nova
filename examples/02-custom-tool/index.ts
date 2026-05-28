@@ -17,10 +17,10 @@ import { z } from 'zod'
 import {
   Agent,
   createRouter,
+  createOpenAICompatibleProvider,
   defineTool,
   fsTools,
 } from 'agentnova'
-import { createOpenAI } from '@ai-sdk/openai'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 
@@ -37,25 +37,6 @@ async function askApproval(req: { tool: string; args: Record<string, unknown>; p
   } finally {
     rl.close()
   }
-}
-
-// ─── 智谱 GLM 兼容性补丁 ───────────────────────────────────────────────
-const zhipuCompatibleFetch: typeof fetch = async (url, options) => {
-  if (options?.body && typeof options.body === 'string') {
-    try {
-      const body = JSON.parse(options.body)
-      if (Array.isArray(body.messages)) {
-        body.messages = body.messages.map((m: any) => {
-          if (m.role === 'assistant' && m.content === null) {
-            return { ...m, content: '' }
-          }
-          return m
-        })
-      }
-      options = { ...options, body: JSON.stringify(body) }
-    } catch {}
-  }
-  return fetch(url as string, options)
 }
 
 // ─── 自定义工具：天气查询 ──────────────────────────────────────
@@ -133,16 +114,15 @@ async function main() {
     process.exit(1)
   }
 
-  const client = createOpenAI({
+  const provider = createOpenAICompatibleProvider({
+    id: 'custom-llm',
+    name: `Custom (${model})`,
+    model,
     baseURL,
     apiKey,
-    fetch: zhipuCompatibleFetch,
   })
 
-  const router = createRouter(
-    [{ id: 'custom-llm', model: client(model), name: `Custom (${model})` }],
-    'custom-llm',
-  )
+  const router = createRouter([provider], 'custom-llm')
 
   const agent = new Agent({
     systemPrompt: '你是天气和数学助手，用中文回复。可以查询天气和做数学计算。',

@@ -27,6 +27,24 @@ import type {
   ContextConfig,
 } from './types.js'
 
+// ─── Message Normalization ──────────────────────────────────────
+
+/**
+ * Normalize assistant messages so that `content` is never null/undefined.
+ * Some OpenAI-compatible providers (e.g. Zhipu GLM) reject `assistant.content === null`,
+ * which can occur when the assistant only emits tool_calls without text.
+ * Replacing null/undefined with an empty string keeps the message array safe to
+ * resend regardless of the downstream provider.
+ */
+function normalizeAssistantMessages(msgs: CoreMessage[]): CoreMessage[] {
+  return msgs.map((m) => {
+    if (m.role === 'assistant' && (m.content === null || m.content === undefined)) {
+      return { ...m, content: '' } as CoreMessage
+    }
+    return m
+  })
+}
+
 // ─── Agent Class ───────────────────────────────────────────────────
 
 export class Agent {
@@ -378,7 +396,7 @@ export class Agent {
         // Sync messages: SDK returns ONLY newly generated messages this turn
         // (assistant + tool results). Append to existing messages to preserve user history.
         if (result.response?.messages && result.response.messages.length > 0) {
-          this.messages = [...this.messages, ...result.response.messages]
+          this.messages = [...this.messages, ...normalizeAssistantMessages(result.response.messages)]
           // Adjust memoryMessageIdx if we had injected memory
           if (this.memoryMessageIdx >= 0) {
             this.memoryMessageIdx = 1 // right after system prompt
@@ -474,7 +492,7 @@ export class Agent {
         // Sync messages: append newly generated messages from SDK to preserve history
         const responseMsgs = (consumed as any).response?.messages
         if (responseMsgs?.length) {
-          this.messages = [...this.messages, ...responseMsgs]
+          this.messages = [...this.messages, ...normalizeAssistantMessages(responseMsgs)]
           if (this.memoryMessageIdx >= 0) {
             this.memoryMessageIdx = 1
           }

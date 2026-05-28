@@ -19,10 +19,10 @@
 import {
   Agent,
   createRouter,
+  createOpenAICompatibleProvider,
   fsTools,
   shellTools,
 } from 'agentnova'
-import { createOpenAI } from '@ai-sdk/openai'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 
@@ -41,25 +41,6 @@ async function askApproval(req: { tool: string; args: Record<string, unknown>; p
   }
 }
 
-// ─── 智谱 GLM 兼容性补丁 ───────────────────────────────────────────────
-const zhipuCompatibleFetch: typeof fetch = async (url, options) => {
-  if (options?.body && typeof options.body === 'string') {
-    try {
-      const body = JSON.parse(options.body)
-      if (Array.isArray(body.messages)) {
-        body.messages = body.messages.map((m: any) => {
-          if (m.role === 'assistant' && m.content === null) {
-            return { ...m, content: '' }
-          }
-          return m
-        })
-      }
-      options = { ...options, body: JSON.stringify(body) }
-    } catch {}
-  }
-  return fetch(url as string, options)
-}
-
 // ─── 从环境变量创建 Provider ────────────────────────────────────────
 function createProviderFromEnv() {
   const baseURL = process.env.LLM_BASE_URL
@@ -71,17 +52,13 @@ function createProviderFromEnv() {
     process.exit(1)
   }
 
-  const client = createOpenAI({
-    baseURL,
-    apiKey,
-    fetch: zhipuCompatibleFetch,
-  })
-
-  return {
+  return createOpenAICompatibleProvider({
     id: 'custom-llm',
     name: `Custom (${model})`,
-    model: client(model),
-  }
+    model,
+    baseURL,
+    apiKey,
+  })
 }
 
 async function main() {

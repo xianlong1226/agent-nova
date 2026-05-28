@@ -1,5 +1,5 @@
 {
-  "name": "agentnova-example-multi-provider",
+  "name": "agentnova-example-streaming-memory",
   "private": true,
   "type": "module",
   "scripts": {

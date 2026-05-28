@@ -1,5 +1,5 @@
 /**
- * 自定义端点示例 — 演示如何使用自定义 baseUrl、apiKey、model
+ * 流式输出 + 长期记忆示例 — 演示 runStream + remember + LongTermMemory
  *
  * 运行方式：
  *   pnpm install
@@ -11,9 +11,6 @@
  *
  *   # OpenAI
  *   LLM_BASE_URL=https://api.openai.com/v1 LLM_API_KEY=xxx LLM_MODEL=gpt-4o pnpm start
- *
- *   # 本地 Ollama
- *   LLM_BASE_URL=http://localhost:11434/v1 LLM_API_KEY=ollama LLM_MODEL=qwen2.5-coder:7b pnpm start
  */
 
 import {
@@ -27,7 +24,6 @@ import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 
 // ─── 交互式权限审批 ASK 回调 ───────────────────────────────────────
-// 调用敏感工具（shell.exec / fs.writeFile 等）时弹出询问
 async function askApproval(req: { tool: string; args: Record<string, unknown>; permission: { level: string } }) {
   const rl = readline.createInterface({ input, output })
   try {
@@ -42,9 +38,7 @@ async function askApproval(req: { tool: string; args: Record<string, unknown>; p
   }
 }
 
-// ─── 推荐方式：使用 createOpenAICompatibleProvider ────────────────────
-// 最简洁的方式，一行搞定自定义 baseURL / apiKey / model
-
+// ─── 从环境变量创建 Provider ────────────────────────────────────────
 function createProviderFromEnv() {
   const baseURL = process.env.LLM_BASE_URL
   const apiKey = process.env.LLM_API_KEY
@@ -55,7 +49,6 @@ function createProviderFromEnv() {
     process.exit(1)
   }
 
-  // 一个函数调用完成 baseURL / apiKey / model 配置
   return createOpenAICompatibleProvider({
     id: 'custom-llm',
     name: `Custom (${model})`,
@@ -65,34 +58,16 @@ function createProviderFromEnv() {
   })
 }
 
-// ─── 下沉方式：直接使用 @ai-sdk/openai 的 createOpenAI ───────────────
-// 适合需要精细控制的场景（自定义 fetch / headers / 重试等）
-//
-// import { createOpenAI } from '@ai-sdk/openai'
-//
-// const client = createOpenAI({
-//   baseURL: 'https://api.deepseek.com/v1',
-//   apiKey: 'sk-xxx',
-// })
-//
-// const provider = {
-//   id: 'deepseek',
-//   name: 'DeepSeek Chat',
-//   model: client('deepseek-chat'),
-// }
-
 // ─── 运行 ────────────────────────────────────────────────────────────
 
 async function main() {
   const provider = createProviderFromEnv()
-  console.log(`🔮 使用自定义端点: ${provider.name}\n`)
+  console.log(`🔮 使用模型: ${provider.name}\n`)
 
   const router = createRouter([provider], provider.id)
 
   const agent = new Agent({
-    systemPrompt: `你是一个智能助手，帮助用户完成各种任务。
-你可以读写文件、执行命令来完成任务。
-用中文回复，简洁直接。`,
+    systemPrompt: '你是雅典娜，一个擅长总结归纳的 AI 助手。用中文回复，简洁直接。',
     workingDir: process.cwd(),
     router,
     tools: [...fsTools, ...shellTools],
@@ -100,12 +75,23 @@ async function main() {
       mode: 'ask',
       onApprovalNeeded: askApproval,
     },
+    // 启用长期记忆（SQLite 持久化）
+    longTermMemory: {
+      dbPath: './data/memory.db',
+    },
   })
 
-  const prompt = process.argv[2] ?? '你好，帮我看看当前目录有什么文件'
+  // 预先存储一些项目记忆
+  await agent.remember('project_style', '项目使用 TypeScript + pnpm workspace + Turbo monorepo', 'project')
+  await agent.remember('team_rule', '代码审查必须通过才能合并', 'project')
+
+  console.log('🧠 雅典娜已就位（带长期记忆）\n')
+
+  const prompt = process.argv[2] ?? '帮我看看项目结构，然后给我一个合理的目录划分建议'
   console.log(`📝 Prompt: ${prompt}\n`)
 
-  const result = await agent.run(prompt, {
+  // 流式运行：通过 onStep 实时输出文本
+  const result = await agent.runStream(prompt, {
     maxSteps: 10,
     onStep: (step) => {
       if (step.text) process.stdout.write(step.text)
@@ -124,6 +110,10 @@ async function main() {
     console.log(`🔤 Tokens: ${result.usage.totalTokens}`)
     console.log(`💰 预估费用: $${result.usage.estimatedCost.toFixed(4)}`)
   }
+
+  // 查看执行轨迹
+  const trace = agent.getTrace()
+  console.log(`\n📋 执行轨迹: ${trace.entries.length} 条记录`)
 }
 
 main().catch(console.error)
