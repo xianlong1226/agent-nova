@@ -3,10 +3,17 @@
  *
  * 运行方式：
  *   pnpm install
- *   DEEPSEEK_API_KEY=xxx pnpm start "帮我看看当前目录有什么文件"
+ *   LLM_BASE_URL=https://api.deepseek.com/v1 LLM_API_KEY=xxx LLM_MODEL=deepseek-chat pnpm start
  *
- * 也支持 OpenAI：
- *   OPENAI_API_KEY=xxx OPENAI_BASE_URL=https://api.openai.com/v1 pnpm start "hello"
+ * 其他示例：
+ *   # 通义千问
+ *   LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1 LLM_API_KEY=xxx LLM_MODEL=qwen-max pnpm start
+ *
+ *   # OpenAI
+ *   LLM_BASE_URL=https://api.openai.com/v1 LLM_API_KEY=xxx LLM_MODEL=gpt-4o pnpm start
+ *
+ *   # 本地 Ollama
+ *   LLM_BASE_URL=http://localhost:11434/v1 LLM_API_KEY=ollama LLM_MODEL=qwen2.5-coder:7b pnpm start
  */
 
 import {
@@ -16,26 +23,69 @@ import {
   shellTools,
 } from 'agentnova'
 import { createOpenAI } from '@ai-sdk/openai'
+import readline from 'node:readline/promises'
+import { stdin as input, stdout as output } from 'node:process'
 
-// 从环境变量中选择 Provider
-function createProvider() {
-  if (process.env.DEEPSEEK_API_KEY) {
-    const deepseek = createOpenAI({
-      baseURL: 'https://api.deepseek.com/v1',
-      apiKey: process.env.DEEPSEEK_API_KEY,
-    })
-    return { id: 'deepseek', model: deepseek('deepseek-chat'), name: 'DeepSeek' }
+// ─── 交互式权限审批 ASK 回调 ───────────────────────────────────────
+async function askApproval(req: { tool: string; args: Record<string, unknown>; permission: { level: string } }) {
+  const rl = readline.createInterface({ input, output })
+  try {
+    console.log('\n⚠️  需要授权：工具 「' + req.tool + '」 (级别: ' + req.permission.level + ')')
+    console.log('   参数: ' + JSON.stringify(req.args).slice(0, 200))
+    const ans = (await rl.question('   [y] 允许一次  [a] 始终允许  [n] 拒绝  > ')).trim().toLowerCase()
+    if (ans === 'a' || ans === 'always') return 'allow-always' as const
+    if (ans === 'y' || ans === 'yes') return 'allow-once' as const
+    return 'deny' as const
+  } finally {
+    rl.close()
+  }
+}
+
+// ─── 智谱 GLM 兼容性补丁 ───────────────────────────────────────────────
+const zhipuCompatibleFetch: typeof fetch = async (url, options) => {
+  if (options?.body && typeof options.body === 'string') {
+    try {
+      const body = JSON.parse(options.body)
+      if (Array.isArray(body.messages)) {
+        body.messages = body.messages.map((m: any) => {
+          if (m.role === 'assistant' && m.content === null) {
+            return { ...m, content: '' }
+          }
+          return m
+        })
+      }
+      options = { ...options, body: JSON.stringify(body) }
+    } catch {}
+  }
+  return fetch(url as string, options)
+}
+
+// ─── 从环境变量创建 Provider ────────────────────────────────────────
+function createProviderFromEnv() {
+  const baseURL = process.env.LLM_BASE_URL
+  const apiKey = process.env.LLM_API_KEY
+  const model = process.env.LLM_MODEL
+
+  if (!baseURL || !apiKey || !model) {
+    console.error('❌ 请设置环境变量：LLM_BASE_URL, LLM_API_KEY, LLM_MODEL')
+    process.exit(1)
   }
 
-  const openai = createOpenAI({
-    baseURL: process.env.OPENAI_BASE_URL,
-    apiKey: process.env.OPENAI_API_KEY,
+  const client = createOpenAI({
+    baseURL,
+    apiKey,
+    fetch: zhipuCompatibleFetch,
   })
-  return { id: 'openai', model: openai('gpt-4o-mini'), name: 'OpenAI' }
+
+  return {
+    id: 'custom-llm',
+    name: `Custom (${model})`,
+    model: client(model),
+  }
 }
 
 async function main() {
-  const provider = createProvider()
+  const provider = createProviderFromEnv()
   console.log(`🔮 使用模型: ${provider.name}\n`)
 
   const router = createRouter([provider], provider.id)
@@ -48,7 +98,8 @@ async function main() {
     router,
     tools: [...fsTools, ...shellTools],
     permissions: {
-      mode: 'auto',
+      mode: 'ask',
+      onApprovalNeeded: askApproval,
     },
   })
 

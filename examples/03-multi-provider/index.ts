@@ -15,6 +15,23 @@ import {
   shellTools,
 } from 'agentnova'
 import { createOpenAI } from '@ai-sdk/openai'
+import readline from 'node:readline/promises'
+import { stdin as input, stdout as output } from 'node:process'
+
+// ─── 交互式权限审批 ASK 回调 ───────────────────────────────────────
+async function askApproval(req: { tool: string; args: Record<string, unknown>; permission: { level: string } }) {
+  const rl = readline.createInterface({ input, output })
+  try {
+    console.log('\n⚠️  需要授权：工具 「' + req.tool + '」 (级别: ' + req.permission.level + ')')
+    console.log('   参数: ' + JSON.stringify(req.args).slice(0, 200))
+    const ans = (await rl.question('   [y] 允许一次  [a] 始终允许  [n] 拒绝  > ')).trim().toLowerCase()
+    if (ans === 'a' || ans === 'always') return 'allow-always' as const
+    if (ans === 'y' || ans === 'yes') return 'allow-once' as const
+    return 'deny' as const
+  } finally {
+    rl.close()
+  }
+}
 
 async function main() {
   // ─── 1. 配置多个 Provider ─────────────────────────────────
@@ -52,7 +69,10 @@ async function main() {
     workingDir: process.cwd(),
     router,
     tools: [...fsTools, ...shellTools],
-    permissions: { mode: 'auto' },
+    permissions: {
+      mode: 'ask',
+      onApprovalNeeded: askApproval,
+    },
   })
 
   // ─── 4. 运行不同复杂度的任务 ──────────────────────────────

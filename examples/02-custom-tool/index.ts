@@ -1,5 +1,16 @@
 /**
  * 自定义工具示例 — 展示如何创建和使用自定义工具
+ *
+ * 运行方式：
+ *   pnpm install
+ *   LLM_BASE_URL=https://api.deepseek.com/v1 LLM_API_KEY=xxx LLM_MODEL=deepseek-chat pnpm start
+ *
+ * 其他示例：
+ *   # 通义千问
+ *   LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1 LLM_API_KEY=xxx LLM_MODEL=qwen-max pnpm start
+ *
+ *   # OpenAI
+ *   LLM_BASE_URL=https://api.openai.com/v1 LLM_API_KEY=xxx LLM_MODEL=gpt-4o pnpm start
  */
 
 import { z } from 'zod'
@@ -10,6 +21,42 @@ import {
   fsTools,
 } from 'agentnova'
 import { createOpenAI } from '@ai-sdk/openai'
+import readline from 'node:readline/promises'
+import { stdin as input, stdout as output } from 'node:process'
+
+// ─── 交互式权限审批 ASK 回调 ───────────────────────────────────────
+async function askApproval(req: { tool: string; args: Record<string, unknown>; permission: { level: string } }) {
+  const rl = readline.createInterface({ input, output })
+  try {
+    console.log('\n⚠️  需要授权：工具 「' + req.tool + '」 (级别: ' + req.permission.level + ')')
+    console.log('   参数: ' + JSON.stringify(req.args).slice(0, 200))
+    const ans = (await rl.question('   [y] 允许一次  [a] 始终允许  [n] 拒绝  > ')).trim().toLowerCase()
+    if (ans === 'a' || ans === 'always') return 'allow-always' as const
+    if (ans === 'y' || ans === 'yes') return 'allow-once' as const
+    return 'deny' as const
+  } finally {
+    rl.close()
+  }
+}
+
+// ─── 智谱 GLM 兼容性补丁 ───────────────────────────────────────────────
+const zhipuCompatibleFetch: typeof fetch = async (url, options) => {
+  if (options?.body && typeof options.body === 'string') {
+    try {
+      const body = JSON.parse(options.body)
+      if (Array.isArray(body.messages)) {
+        body.messages = body.messages.map((m: any) => {
+          if (m.role === 'assistant' && m.content === null) {
+            return { ...m, content: '' }
+          }
+          return m
+        })
+      }
+      options = { ...options, body: JSON.stringify(body) }
+    } catch {}
+  }
+  return fetch(url as string, options)
+}
 
 // ─── 自定义工具：天气查询 ──────────────────────────────────────
 
@@ -77,14 +124,24 @@ const mathTool = defineTool({
 // ─── 运行 ────────────────────────────────────────────────────────
 
 async function main() {
-  const provider = createOpenAI({
-    baseURL: process.env.DEEPSEEK_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.deepseek.com/v1',
-    apiKey: process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY,
+  const baseURL = process.env.LLM_BASE_URL
+  const apiKey = process.env.LLM_API_KEY
+  const model = process.env.LLM_MODEL
+
+  if (!baseURL || !apiKey || !model) {
+    console.error('❌ 请设置环境变量：LLM_BASE_URL, LLM_API_KEY, LLM_MODEL')
+    process.exit(1)
+  }
+
+  const client = createOpenAI({
+    baseURL,
+    apiKey,
+    fetch: zhipuCompatibleFetch,
   })
 
   const router = createRouter(
-    [{ id: 'default', model: provider('deepseek-chat'), name: 'DeepSeek' }],
-    'default',
+    [{ id: 'custom-llm', model: client(model), name: `Custom (${model})` }],
+    'custom-llm',
   )
 
   const agent = new Agent({
@@ -92,7 +149,10 @@ async function main() {
     workingDir: process.cwd(),
     router,
     tools: [...fsTools, weatherTool, mathTool],
-    permissions: { mode: 'auto' },
+    permissions: {
+      mode: 'ask',
+      onApprovalNeeded: askApproval,
+    },
   })
 
   const prompt = process.argv[2] ?? '北京今天天气怎么样？顺便帮我算一下 (26 + 14) * 3'
