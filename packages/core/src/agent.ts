@@ -375,10 +375,10 @@ export class Agent {
           stepInfo.toolCalls = result.toolCalls.map(tc => ({ tool: tc.toolName, args: tc.args as Record<string, unknown> }))
         }
 
-        // Sync messages: SDK returns complete message list for this turn
-        // Rebuild our messages with system prompt + SDK messages
+        // Sync messages: SDK returns ONLY newly generated messages this turn
+        // (assistant + tool results). Append to existing messages to preserve user history.
         if (result.response?.messages && result.response.messages.length > 0) {
-          this.messages = [this.messages[0], ...result.response.messages]
+          this.messages = [...this.messages, ...result.response.messages]
           // Adjust memoryMessageIdx if we had injected memory
           if (this.memoryMessageIdx >= 0) {
             this.memoryMessageIdx = 1 // right after system prompt
@@ -471,10 +471,10 @@ export class Agent {
           }
         }
 
-        // Sync messages from SDK response
+        // Sync messages: append newly generated messages from SDK to preserve history
         const responseMsgs = (consumed as any).response?.messages
         if (responseMsgs?.length) {
-          this.messages = [this.messages[0], ...responseMsgs]
+          this.messages = [...this.messages, ...responseMsgs]
           if (this.memoryMessageIdx >= 0) {
             this.memoryMessageIdx = 1
           }

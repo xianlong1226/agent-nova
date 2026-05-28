@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Current Example",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/tsx",
+      "runtimeArgs": ["--conditions", "node"],
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "DEEPSEEK_API_KEY": "${env:DEEPSEEK_API_KEY}",
+        "OPENAI_API_KEY": "${env:OPENAI_API_KEY}",
+        "OPENAI_BASE_URL": "${env:OPENAI_BASE_URL}"
+      },
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "node_modules/**"]
+    }
+  ]
+}
