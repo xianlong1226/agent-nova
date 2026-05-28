@@ -52,10 +52,10 @@ describe('WorkingMemory', () => {
     expect(keys.sort()).toEqual(['k1', 'k2'])
   })
 
-  it('should clear all items', () => {
-    memory.save('a', 'x')
-    memory.clear()
-    expect(memory.list()).resolves.toEqual([])
+  it('should clear all items', async () => {
+    await memory.save('a', 'x')
+    await memory.clear()
+    await expect(memory.list()).resolves.toEqual([])
   })
 })
 
