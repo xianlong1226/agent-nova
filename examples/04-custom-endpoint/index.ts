@@ -24,8 +24,26 @@ import {
   shellTools,
 } from 'agentnova'
 import { createOpenAI } from '@ai-sdk/openai'
+import readline from 'node:readline/promises'
+import { stdin as input, stdout as output } from 'node:process'
 
-// ─── 智谱 GLM 兼容性补丁 ───────────────────────────────────────────
+// ─── 交互式权限审批 ASK 回调 ───────────────────────────────────────
+// 调用敏感工具（shell.exec / fs.writeFile 等）时弹出询问
+async function askApproval(req: { tool: string; args: Record<string, unknown>; permission: { level: string } }) {
+  const rl = readline.createInterface({ input, output })
+  try {
+    console.log('\n⚠️  需要授权：工具 「' + req.tool + '」 (级别: ' + req.permission.level + ')')
+    console.log('   参数: ' + JSON.stringify(req.args).slice(0, 200))
+    const ans = (await rl.question('   [y] 允许一次  [a] 始终允许  [n] 拒绝  > ')).trim().toLowerCase()
+    if (ans === 'a' || ans === 'always') return 'allow-always' as const
+    if (ans === 'y' || ans === 'yes') return 'allow-once' as const
+    return 'deny' as const
+  } finally {
+    rl.close()
+  }
+}
+
+// ─── 智谱 GLM 兼容性补丁 ───────────────────────────────────────────────
 // 智谱不接受 assistant.content === null，要求必须是字符串
 const zhipuCompatibleFetch: typeof fetch = async (url, options) => {
   if (options?.body && typeof options.body === 'string') {
@@ -104,7 +122,8 @@ async function main() {
     router,
     tools: [...fsTools, ...shellTools],
     permissions: {
-      mode: 'allow',
+      mode: 'ask',
+      onApprovalNeeded: askApproval,
     },
   })
 
