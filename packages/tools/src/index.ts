@@ -1,20 +1,8 @@
-// ─── Types (forwarded from @agentnova/contracts via ./types) ───────
-export type {
-  PermissionLevel,
-  ToolPermission,
-  ApprovalRequest,
-  ApprovalResult,
-  ApprovalFn,
-  ToolPreflight,
-  ToolPreflightCtx,
-  PreflightResult,
-  ToolContext,
-  ToolDefinition,
-  ToolCall,
-  ToolResult,
-  AgentStateSnapshot,
-  ToolLogger,
-} from './types.js'
+// ─── Types ─────────────────────────────────────────────────────────
+// types.ts already forwards every shared contract type via `export type *`,
+// so a single wildcard here keeps both contract-forwarded and tools-local
+// types in sync automatically — no manual list to maintain.
+export type * from './types.js'
 export { defineTool } from './types.js'
 
 // ─── Registry & Engine ─────────────────────────────────────────────

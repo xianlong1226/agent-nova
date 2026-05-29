@@ -1,26 +1,9 @@
 import { z } from 'zod'
-import type {
-  PermissionLevel,
-  ToolPermission,
-  ApprovalRequest,
-  ApprovalResult,
-  ApprovalFn,
-  ToolPreflight,
-  ToolPreflightCtx,
-  PreflightResult,
-} from '@agentnova/contracts'
+import type { ToolPermission, ApprovalFn, ToolPreflight } from '@agentnova/contracts'
 
-// Re-export shared contract types so tool authors can import everything from '@agentnova/tools'.
-export type {
-  PermissionLevel,
-  ToolPermission,
-  ApprovalRequest,
-  ApprovalResult,
-  ApprovalFn,
-  ToolPreflight,
-  ToolPreflightCtx,
-  PreflightResult,
-}
+// Forward ALL shared contract types so tool authors can import everything from '@agentnova/tools'.
+// Using wildcard re-export keeps this list auto-synced with @agentnova/contracts — no manual drift.
+export type * from '@agentnova/contracts'
 
 // ─── Tool Context ──────────────────────────────────────────────────
 
