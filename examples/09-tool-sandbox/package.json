@@ -1,0 +1,16 @@
+{
+  "name": "agentnova-example-tool-sandbox",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "agentnova": "workspace:*",
+    "ai": "^4.3.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}
