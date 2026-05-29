@@ -1,7 +1,19 @@
 {
   "name": "@agentnova/memory",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "AgentNova memory system",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xxx/agent-nova",
+    "directory": "packages/memory"
+  },
+  "homepage": "https://github.com/xxx/agent-nova#readme",
+  "keywords": ["agent", "ai", "memory", "sqlite", "typescript"],
+  "files": ["dist"],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

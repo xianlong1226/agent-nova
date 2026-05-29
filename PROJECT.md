@@ -208,15 +208,84 @@ Agent 主循环集成测试覆盖：单步结束、多步工具调用、Provider
 
 ## 发布与版本
 
-当前版本：**v0.1.0**（MVP，生产级基础设施完整）。
+本项目使用 [Changesets](https://github.com/changesets/changesets) 管理多包版本与发布流程。
 
-发布前 Checklist：
+### 前置要求
 
-1. `pnpm clean && pnpm install`
-2. `pnpm build` 必须全部通过
-3. `pnpm test` 全绿
-4. 同步更新各包 `package.json` 的 `version`
-5. 子包先发，根入口 `agentnova` 后发
+- 已通过 `npm login` 登录有 `@agentnova` scope 发布权限的 npm 账号
+- 确保 npm registry 上已创建 `@agentnova` org（首次发布前）
+
+### 工具安装
+
+Changesets CLI 已配置在根 `devDependencies`，执行 `pnpm install` 即可使用。
+
+### 版本策略
+
+- 所有包使用 **linked** 策略联动版本（`agentnova` + `@agentnova/*`）
+- 内部依赖（`workspace:*`）发布时自动替换为真实版本号
+- 默认 `access: public`，scoped 包可直接发布到公共 registry
+
+### 发布流程
+
+```bash
+# 1. 记录变更（交互式选择受影响的包和版本升级类型 patch/minor/major）
+pnpm changeset
+
+# 2. 消费 changeset，自动更新各包 version 和生成 CHANGELOG.md
+pnpm version-packages
+
+# 3. 检查产物：确认 package.json 版本号已更新、CHANGELOG 内容正确
+git diff
+
+# 4. 提交版本变更
+git add .
+git commit -m "chore: version packages"
+
+# 5. 构建并发布到 npm
+pnpm release
+# 等价于 pnpm build && changeset publish
+
+# 6. 打 tag 并推送
+git push --follow-tags
+```
+
+### 发布前 Checklist
+
+| # | 检查项 | 命令 |
+|---|--------|------|
+| 1 | 依赖干净 | `pnpm clean && pnpm install` |
+| 2 | 构建通过 | `pnpm build` |
+| 3 | 测试全绿 | `pnpm test` |
+| 4 | changeset 已消费 | `pnpm version-packages`（无未消费的 changeset） |
+| 5 | 版本号正确 | 检查各包 `package.json` 中 `version` 字段 |
+| 6 | Git 工作区干净 | `git status` 无未提交改动 |
+
+### 手动发布单包（调试用）
+
+```bash
+cd packages/core
+pnpm build
+npm publish --access public
+```
+
+### 常用命令速查
+
+| 命令 | 作用 |
+|------|------|
+| `pnpm changeset` | 添加一个 changeset（记录本次改动涉及哪些包、bump 类型、变更描述） |
+| `pnpm version-packages` | 消费所有 changeset → 更新 version + 生成 CHANGELOG |
+| `pnpm release` | 构建全部包 → 发布到 npm registry |
+| `pnpm changeset status` | 查看当前未消费的 changeset |
+
+### 配置文件
+
+- **`.changeset/config.json`** — Changesets 核心配置（linked 策略、access、baseBranch 等）
+- 各包 `package.json` 中 `publishConfig.access: "public"` 确保 scoped 包可公开发布
+- `files: ["dist"]` 确保仅发布构建产物，不包含源码和测试
+
+### 关于 `workspace:*` 协议
+
+pnpm publish / changeset publish 会在发布时自动将 `workspace:*` 替换为对应包的实际版本号（如 `^0.1.0`），用户通过 npm 安装后能正确解析依赖关系，无需手动修改。
 
 技能（Skill）发布渠道（Git / npm / dry-run）见 [ARCHITECTURE.md 第十章](./ARCHITECTURE.md)。
 

@@ -1,7 +1,19 @@
 {
   "name": "@agentnova/permission",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "AgentNova permission and security system",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xxx/agent-nova",
+    "directory": "packages/permission"
+  },
+  "homepage": "https://github.com/xxx/agent-nova#readme",
+  "keywords": ["agent", "ai", "permission", "security", "typescript"],
+  "files": ["dist"],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

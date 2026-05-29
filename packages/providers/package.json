@@ -1,7 +1,19 @@
 {
   "name": "@agentnova/providers",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "AgentNova multi-provider router",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xxx/agent-nova",
+    "directory": "packages/providers"
+  },
+  "homepage": "https://github.com/xxx/agent-nova#readme",
+  "keywords": ["agent", "ai", "llm", "provider", "openai", "anthropic", "typescript"],
+  "files": ["dist"],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
