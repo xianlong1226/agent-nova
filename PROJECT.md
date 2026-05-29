@@ -6,21 +6,22 @@
 
 ## 项目概述
 
-AgentNova 是 TypeScript 原生的 Agent 开发框架，按职责拆分为 7 个 workspace 包，使用 pnpm + Turbo 管理 monorepo，tsup 产出 ESM + CJS + DTS 三套构建产物，Vitest 做测试。
+AgentNova 是 TypeScript 原生的 Agent 开发框架，按职责拆分为 8 个 workspace 包，使用 pnpm + Turbo 管理 monorepo，tsup 产出 ESM + CJS + DTS 三套构建产物，Vitest 做测试。
 
 ## 仓库结构
 
 ```
 agent-nova/
-├── packages/                # 7 个 workspace 包（见下文「包职责」）
-│   ├── core/                # Agent 核心：主循环、上下文、追踪
+├── packages/                # 8 个 workspace 包（见下文「包职责」）
+│   ├── contracts/           # 共享类型契约（零运行时依赖）
+│   ├── core/                # Agent 核心：主循环、上下文、追踪、会话
 │   ├── tools/               # 工具注册与执行
 │   ├── permission/          # 权限沙箱与审批
 │   ├── memory/              # 三层记忆（sql.js）
 │   ├── providers/           # Provider 路由与流控
 │   ├── skills/              # 技能加载与发布
 │   └── agentnova/           # 统一入口 + CLI
-├── examples/                # 6 个可独立运行的示例（独立 workspace）
+├── examples/                # 9 个可独立运行的示例（独立 workspace）
 ├── skills/                  # 内置 / 示例技能（code-review, git-ops）
 ├── docs/
 │   ├── API.md               # API 参考
@@ -195,17 +196,7 @@ agentnova create my-agent
 | 单包 | `cd packages/<name> && pnpm test` |
 | 单文件 | `cd packages/<name> && pnpm vitest run test/some.test.ts` |
 
-测试目录约定：`packages/<name>/test/*.test.ts`。当前覆盖：
-
-| 模块 | 测试数 |
-|------|-------|
-| @agentnova/core | 52+ |
-| @agentnova/permission | 13 |
-| @agentnova/memory | 22 |
-| @agentnova/tools | 7 |
-| @agentnova/providers | 1 |
-| @agentnova/skills | 1 |
-| agentnova | 1 |
+测试目录约定：`packages/<name>/test/*.test.ts`。各包覆盖范围请直接查看 `packages/<name>/test/`。
 
 Agent 主循环集成测试覆盖：单步结束、多步工具调用、Provider 降级、上下文压缩、资源限制、AbortSignal 取消、钩子拦截、错误恢复、会话隔离。详见 [packages/core/test/](./packages/core/test/)。
 

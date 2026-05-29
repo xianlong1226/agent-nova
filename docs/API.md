@@ -1,6 +1,6 @@
 # AgentNova SDK — API 参考文档
 
-> 版本：0.1.0 | 更新：2026-05-28
+> 版本与变更以各包 `package.json` 与 [CHANGELOG](../.changeset) 为准。
 
 ---
 
@@ -9,6 +9,7 @@
 - [核心模块](#核心模块)
   - [Agent](#agent)
   - [createAgent](#createagent)
+  - [quickAgent](#quickagent)
 - [工具模块](#工具模块)
   - [defineTool](#definetool)
   - [ToolRegistry](#toolregistry)
@@ -19,6 +20,7 @@
 - [Provider 模块](#provider-模块)
   - [ProviderRouter](#providerrouter)
   - [预设 Provider](#预设-provider)
+  - [RateLimiter](#ratelimiter)
 - [记忆模块](#记忆模块)
   - [WorkingMemory](#workingmemory)
   - [ProjectMemory](#projectmemory)
@@ -27,9 +29,14 @@
 - [技能模块](#技能模块)
   - [SkillLoader](#skillloader)
   - [SkillRegistry](#skillregistry)
+  - [SkillLoaderWorker](#skillloaderworker)
   - [defineSkill](#defineskill)
+- [会话模块](#会话模块)
+  - [SessionManager](#sessionmanager)
 - [上下文管理](#上下文管理)
   - [ContextManager](#contextmanager)
+- [错误模块](#错误模块)
+  - [AgentError](#agenterror)
 - [追踪 & 日志](#追踪--日志)
   - [TraceCollector](#tracecollector)
   - [TraceReplay](#tracereplay)
@@ -162,6 +169,47 @@ const agent = createAgent({
 
 ---
 
+### quickAgent
+
+带合理默认值的快速工厂函数：默认叠加 `fsTools` + `shellTools`。
+
+```typescript
+import { quickAgent, createRouter, createOpenAICompatibleProvider } from 'agentnova'
+
+const provider = createOpenAICompatibleProvider({
+  id: 'deepseek',
+  name: 'DeepSeek',
+  model: 'deepseek-chat',
+  baseURL: 'https://api.deepseek.com/v1',
+  apiKey: process.env.DEEPSEEK_API_KEY!,
+})
+
+const agent = quickAgent({
+  systemPrompt: '你是个文件助手。',
+  router: createRouter([provider], provider.id),
+  // 可选：调整默认工具或追加自定义工具
+  // includeFsTools: false,
+  // includeShellTools: false,
+  // tools: [myTool],
+  // permissions: { mode: 'ask' },
+})
+```
+
+**QuickAgentConfig**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `systemPrompt` | `string` | ✅ | 系统提示词 |
+| `router` | `ProviderRouter` | ⚠️ | 与 `model` 二选一（当前仅 `router` 生效，`model` 预留） |
+| `model` | `string` | ⚠️ | 预设模型名，与 `router` 二选一 |
+| `workingDir` | `string` | ❌ | 默认 `process.cwd()` |
+| `tools` | `ToolDefinition[]` | ❌ | 额外工具 |
+| `includeFsTools` | `boolean` | ❌ | 默认 `true` |
+| `includeShellTools` | `boolean` | ❌ | 默认 `true` |
+| `permissions` | `Partial<PermissionConfig>` | ❌ | 权限覆写 |
+
+---
+
 ## 工具模块
 
 > `import { defineTool, ToolRegistry, ToolEngine, fsTools, shellTools } from 'agentnova'`
@@ -234,10 +282,11 @@ import { fsTools, shellTools } from 'agentnova'
 
 | 工具名 | 权限 | 说明 |
 |--------|------|------|
-| `fs.readFile` | read | 读取文件内容 |
-| `fs.writeFile` | write | 写入文件 |
+| `fs.readFile` | read | 读取文件内容（内置 preflight：路径白名单 + 文件大小限制） |
+| `fs.writeFile` | write | 写入文件（内置 preflight） |
 | `fs.listDir` | read | 列出目录内容 |
-| `shell.exec` | dangerous | 执行 Shell 命令 |
+| `fs.stat` | read | 获取文件/目录元信息（大小、修改时间、类型） |
+| `shell.exec` | dangerous | 执行 Shell 命令（内置 preflight：命令黑名单） |
 
 ---
 
@@ -275,6 +324,11 @@ const guard = new PermissionGuard({
     cwd: '/project',
     allowedDirs: ['/project/src'],
     blockedCommands: ['rm -rf /'],
+    blockedCommandPatterns: [
+      'rm\\s+-[rR].*\\s+/',
+      'curl\\s+.*\\|\\s*sh',
+    ],
+    maxFileSize: 10 * 1024 * 1024,
   },
 })
 ```
@@ -385,6 +439,47 @@ const myProvider = createOpenAICompatibleProvider({
   name: 'My Custom Model',
 })
 ```
+
+### RateLimiter
+
+Provider 级别的令牌桶限流 + 429 退避器；默认供底层路由使用，也可独立包裹需要限速的调用。
+
+```typescript
+import { RateLimiter } from 'agentnova'
+
+const limiter = new RateLimiter({
+  callsPerMinute: 60,
+  tokensPerMinute: 100_000,
+  perProvider: {
+    deepseek: { callsPerMinute: 30 },
+  },
+  backoffMultiplier: 2,
+  maxBackoffMs: 60_000,
+})
+
+// 在调用前获取许可（突破限额会自动 await）
+await limiter.acquire('deepseek', 1500)
+
+// 遇到 429 后上报
+limiter.reportRateLimited('deepseek', 5000)
+
+// 调用成功后释放退避
+limiter.reportSuccess('deepseek')
+```
+
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `callsPerMinute` | `60` | 全局调用限额 |
+| `tokensPerMinute` | `100_000` | 全局 token 限额 |
+| `perProvider` | `{}` | 按 `providerId` 覆写限额 |
+| `backoffMultiplier` | `2` | 429 退避倍率 |
+| `maxBackoffMs` | `60_000` | 退避间隔上限 |
+
+| 方法 | 说明 |
+|------|------|
+| `acquire(providerId, estimatedTokens)` | 获取调用许可，超限自动 await |
+| `reportRateLimited(providerId, retryAfterMs?)` | 上报 429，击发退避 |
+| `reportSuccess(providerId)` | 调用成功后清除退避 |
 
 ---
 
@@ -511,6 +606,98 @@ const npmResult = await registry.publish('code-review', {
 | `uninstall(name)` | 卸载技能 |
 | `publish(name, options?)` | 发布到 Git 远程或 npm |
 
+### SkillLoaderWorker
+
+运行时按用户输入动态激活技能，仅暴露当前对话需要的工具与系统提示，避免污染主上下文。
+
+```typescript
+import { SkillLoaderWorker } from '@agentnova/core'
+
+const worker = new SkillLoaderWorker()
+await worker.loadAll(['./skills', './team-skills'])
+
+// 根据用户输入激活相关技能
+await worker.activateForInput('帮我审查这段 PR')
+
+// 获取当前激活的工具与提示
+const tools = worker.getActiveTools()
+const prompts = worker.getActivePrompts()
+
+const agent = createAgent({
+  router,
+  tools,
+  systemPrompt: prompts.join('\n\n'),
+})
+```
+
+| 方法 | 说明 |
+|------|------|
+| `loadAll(dirs)` | 从指定目录批量加载技能定义 |
+| `activateForInput(input)` | 根据输入文本匹配并激活技能（基于关键词/触发条件） |
+| `getActiveTools()` | 返回当前激活技能贡献的工具集 |
+| `getActivePrompts()` | 返回当前激活技能贡献的系统提示数组 |
+
+---
+
+## 会话模块
+
+> `import { SessionManager } from '@agentnova/core'`
+
+### SessionManager
+
+多用户多会话管理器，提供持久化、自动保存与同用户串行锁，避免同一用户的并发会话互相覆盖。
+
+```typescript
+import { SessionManager } from '@agentnova/core'
+
+const sm = new SessionManager({
+  storageDir: './sessions',        // 持久化目录（默认 './sessions'）
+  persist: true,                   // 是否落盘（默认 true）
+  autoSaveIntervalMs: 30_000,      // 自动保存间隔（默认 30s）
+  maxConcurrentPerUser: 1,         // 同用户最大并发（默认 1，串行锁）
+})
+
+// 启动时加载已有会话
+await sm.loadAllSessions()
+
+// 创建会话
+const session = sm.createSession('user-123', { title: '产品讨论' })
+
+// 串行运行：同一 userId 的多次 withSession 会自动排队
+const result = await sm.withSession(session.id, async (data) => {
+  // data: SessionData，包含 messages / state / metadata
+  return await agent.run('继续刚才的话题', { state: data.state })
+})
+
+// 优雅退出：保存所有会话并停止定时器
+await sm.shutdown()
+```
+
+| 方法 | 说明 |
+|------|------|
+| `createSession(userId, meta?)` | 创建会话，返回 `SessionData` |
+| `getSession(sessionId)` | 获取会话数据 |
+| `getUserSessions(userId)` | 获取某用户全部会话 |
+| `getLatestSession(userId)` | 获取某用户最近一次会话 |
+| `withSession(sessionId, fn)` | 在串行锁内运行任务，结束后自动保存 |
+| `saveSession(sessionId)` | 立即持久化指定会话 |
+| `saveAll()` | 持久化全部会话 |
+| `loadSession(sessionId)` | 从磁盘加载单个会话 |
+| `loadAllSessions()` | 启动时批量加载 |
+| `deleteSession(sessionId)` | 删除会话（含磁盘文件） |
+| `shutdown()` | 停止自动保存定时器并保存所有会话 |
+
+**默认配置**（`DEFAULT_SESSION_CONFIG`）：
+
+```typescript
+{
+  storageDir: './sessions',
+  persist: true,
+  autoSaveIntervalMs: 30_000,
+  maxConcurrentPerUser: 1,
+}
+```
+
 ---
 
 ## 上下文管理
@@ -534,6 +721,61 @@ if (ctx.needsCompression(messages)) {
   messages = await ctx.compress(messages)
 }
 ```
+
+---
+
+## 错误模块
+
+> `import { AgentError, isRetryable, getRetryDelay, wrapProviderError, toolError } from 'agentnova'`
+
+### AgentError
+
+统一错误类型，承载错误码、是否可重试、建议退避时间等结构化信息。
+
+```typescript
+import { AgentError, isRetryable, getRetryDelay, wrapProviderError, toolError } from 'agentnova'
+
+try {
+  await agent.run('...')
+} catch (err) {
+  if (err instanceof AgentError) {
+    console.log(err.code)        // ErrorCode，如 'PROVIDER_RATE_LIMITED'
+    console.log(err.category)    // RetryCategory: 'retryable' | 'fatal' | 'permission'
+    console.log(err.retryable)   // boolean
+    console.log(err.retryAfterMs) // 建议等待毫秒（若有）
+  }
+
+  if (isRetryable(err)) {
+    const delay = getRetryDelay(err, /* attempt */ 2) // 指数退避计算
+    await new Promise(r => setTimeout(r, delay))
+    // 重试...
+  }
+}
+```
+
+**错误码（`ErrorCode`）：**
+
+| Code | 含义 | 类别 |
+|------|------|------|
+| `PROVIDER_RATE_LIMITED` | Provider 限流（429） | retryable |
+| `PROVIDER_TIMEOUT` | 请求超时 | retryable |
+| `PROVIDER_UNAVAILABLE` | 服务不可用（5xx） | retryable |
+| `PROVIDER_AUTH` | 认证失败（401/403） | fatal |
+| `PROVIDER_BAD_REQUEST` | 参数错误（400） | fatal |
+| `TOOL_EXECUTION_FAILED` | 工具执行抛错 | retryable |
+| `TOOL_TIMEOUT` | 工具超时 | retryable |
+| `PERMISSION_DENIED` | 用户/规则拒绝 | permission |
+| `RESOURCE_LIMIT_EXCEEDED` | 触达资源上限 | fatal |
+| `CONTEXT_OVERFLOW` | 上下文超窗 | fatal |
+
+**辅助函数：**
+
+| 函数 | 说明 |
+|------|------|
+| `isRetryable(err)` | 判断错误是否可重试（仅 `category === 'retryable'`） |
+| `getRetryDelay(err, attempt)` | 计算建议退避毫秒（优先使用 `retryAfterMs`，否则指数退避） |
+| `wrapProviderError(err, providerId)` | 将 Provider 原始错误（OpenAI / Anthropic 等）规范为 `AgentError` |
+| `toolError(code, message, opts?)` | 工具内构造 `AgentError` 的便捷函数 |
 
 ---
 
@@ -634,13 +876,28 @@ type AgentEventName =
 
 ```typescript
 // Core
-export type { AgentConfig, AgentState, AgentRunOptions, AgentResult, StepInfo }
+export type {
+  AgentConfig, AgentState, AgentRunOptions, AgentResult, StepInfo,
+  ContextConfig, CompressionStrategy,
+  Trace, TraceEntry, LogEntry, LogLevel, UsageSnapshot,
+  SessionData, SessionConfig,
+  HookName, HookFn, HookContext,
+  AgentEvent, AgentEventName, EventHandler,
+  ErrorCode, RetryCategory,
+}
 
-// Tools  
-export type { ToolDefinition, ToolCall, ToolResult, ToolContext, ToolPermission }
+// Tools
+export type {
+  ToolDefinition, ToolCall, ToolResult, ToolContext, ToolPermission,
+  ToolPreflight, ToolPreflightCtx, PreflightResult,
+}
 
 // Permission
-export type { PermissionConfig, PermissionRule, SandboxConfig, ResourceLimits }
+export type {
+  PermissionConfig, PermissionRule, PermissionMode,
+  SandboxConfig, ResourceLimits,
+  ApprovalRequest, ApprovalResult,
+}
 
 // Memory
 export type { MemoryItem, MemoryStore, LongTermMemoryConfig }
@@ -649,5 +906,10 @@ export type { MemoryItem, MemoryStore, LongTermMemoryConfig }
 export type { SkillConfig, Skill, SkillManifest }
 
 // Providers
-export type { ProviderConfig, RoutingConfig, TaskComplexity, ProviderId }
+export type {
+  ProviderConfig, RoutingConfig, TaskComplexity, ProviderId,
+  RateLimiterConfig,
+}
 ```
+
+> 上述类型可直接从顶层包 `'agentnova'` 引用；若需绑定到具体子包（如 `'@agentnova/core'`），请参考各包源码导出。

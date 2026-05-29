@@ -75,16 +75,27 @@ export type {
 export {
   WorkingMemory,
   ProjectMemory,
+  LongTermMemory,
   MemoryInjector,
 } from '@agentnova/memory'
-export type { MemoryStore, MemoryItem } from '@agentnova/memory'
+export type { MemoryStore, MemoryItem, LongTermMemoryConfig } from '@agentnova/memory'
+
+// Errors
+export {
+  AgentError,
+  isRetryable,
+  getRetryDelay,
+  wrapProviderError,
+  toolError,
+} from '@agentnova/core'
+export type { ErrorCode, RetryCategory } from '@agentnova/core'
 
 // Skills
 export { SkillLoader, SkillRegistry, defineSkill } from '@agentnova/skills'
 export type { SkillConfig, Skill, SkillManifest } from '@agentnova/skills'
 
 // Providers
-export { ProviderRouter, createRouter } from '@agentnova/providers'
+export { ProviderRouter, createRouter, RateLimiter } from '@agentnova/providers'
 export {
   createOpenAICompatibleProvider,
   openaiGPT4o,
@@ -93,7 +104,13 @@ export {
   claudeSonnet4,
   claudeHaiku35,
 } from '@agentnova/providers'
-export type { ProviderConfig, RoutingConfig, TaskComplexity, ProviderId } from '@agentnova/providers'
+export type {
+  ProviderConfig,
+  RoutingConfig,
+  TaskComplexity,
+  ProviderId,
+  RateLimiterConfig,
+} from '@agentnova/providers'
 
 // Convenience: Quick create with sensible defaults
 import { createAgent } from '@agentnova/core'
