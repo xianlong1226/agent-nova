@@ -126,6 +126,38 @@ importers:
         specifier: ^4.19.0
         version: 4.22.3
 
+  examples/07-context-config:
+    dependencies:
+      agentnova:
+        specifier: workspace:*
+        version: link:../../packages/agentnova
+      ai:
+        specifier: ^4.3.0
+        version: 4.3.19(react@19.2.6)(zod@3.25.76)
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
+    devDependencies:
+      tsx:
+        specifier: ^4.19.0
+        version: 4.22.3
+
+  examples/08-session:
+    dependencies:
+      agentnova:
+        specifier: workspace:*
+        version: link:../../packages/agentnova
+      ai:
+        specifier: ^4.3.0
+        version: 4.3.19(react@19.2.6)(zod@3.25.76)
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
+    devDependencies:
+      tsx:
+        specifier: ^4.19.0
+        version: 4.22.3
+
   packages/agentnova:
     dependencies:
       '@agentnova/core':

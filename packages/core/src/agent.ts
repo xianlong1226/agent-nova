@@ -656,7 +656,17 @@ export class Agent {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       if (this.messages[i].role === 'assistant') {
         const c = this.messages[i].content
-        return typeof c === 'string' ? c : ''
+        if (typeof c === 'string') return c
+        // AI SDK v4 may return assistant.content as an array of parts
+        // (e.g. [{ type: 'text', text: '...' }, { type: 'tool-call', ... }]).
+        // Concatenate all text parts so result.text reflects the model output.
+        if (Array.isArray(c)) {
+          return (c as Array<{ type?: string; text?: string }>)
+            .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
+            .map((p) => p.text as string)
+            .join('')
+        }
+        return ''
       }
     }
     return ''

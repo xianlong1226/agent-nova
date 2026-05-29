@@ -32,6 +32,10 @@ export type {
   LogLevel,
 } from '@agentnova/core'
 
+// Session
+export { SessionManager } from '@agentnova/core'
+export type { SessionData, SessionConfig } from '@agentnova/core'
+
 // Tools
 export { ToolRegistry, ToolEngine, defineTool } from '@agentnova/tools'
 export { fsTools, shellTools } from '@agentnova/tools'
