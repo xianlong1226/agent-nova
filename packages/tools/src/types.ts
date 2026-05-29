@@ -1,25 +1,26 @@
 import { z } from 'zod'
+import type {
+  PermissionLevel,
+  ToolPermission,
+  ApprovalRequest,
+  ApprovalResult,
+  ApprovalFn,
+  ToolPreflight,
+  ToolPreflightCtx,
+  PreflightResult,
+} from '@agentnova/contracts'
 
-// ─── Self-contained types (no cross-package deps for zero-coupling) ─
-
-export type PermissionLevel = 'read' | 'write' | 'dangerous'
-
-export interface ToolPermission {
-  level: PermissionLevel
-  scope?: string[]
-  description?: string
+// Re-export shared contract types so tool authors can import everything from '@agentnova/tools'.
+export type {
+  PermissionLevel,
+  ToolPermission,
+  ApprovalRequest,
+  ApprovalResult,
+  ApprovalFn,
+  ToolPreflight,
+  ToolPreflightCtx,
+  PreflightResult,
 }
-
-export interface ApprovalRequest {
-  tool: string
-  args: Record<string, unknown>
-  permission: ToolPermission
-  reason?: string
-}
-
-export type ApprovalResult = 'allow-once' | 'allow-always' | 'deny'
-
-export type ApprovalFn = (request: ApprovalRequest) => Promise<ApprovalResult>
 
 // ─── Tool Context ──────────────────────────────────────────────────
 
@@ -50,6 +51,11 @@ export interface ToolDefinition<TInput = any, TOutput = any> {
   description: string
   parameters: z.ZodTypeAny
   permission: ToolPermission
+  /**
+   * Optional sandbox preflight carried by the tool itself.
+   * Invoked by PermissionGuard before mode resolution; returning `{ ok: false }` denies the call.
+   */
+  preflight?: ToolPreflight
   execute: (input: TInput, ctx: ToolContext) => Promise<TOutput>
 }
 

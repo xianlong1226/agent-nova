@@ -26,16 +26,13 @@ import {
   createOpenAICompatibleProvider,
   fsTools,
   shellTools,
+  type ApprovalRequest,
 } from 'agentnova'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 
 // ─── 交互式权限审批 ASK 回调 ───────────────────────────────────────
-async function askApproval(req: {
-  tool: string
-  args: Record<string, unknown>
-  permission: { level: string }
-}) {
+async function askApproval(req: ApprovalRequest) {
   const rl = readline.createInterface({ input, output })
   try {
     console.log('\n⚠️  需要授权：工具 「' + req.tool + '」 (级别: ' + req.permission.level + ')')

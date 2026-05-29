@@ -1,4 +1,4 @@
-import type { ResourceLimits } from '@agentnova/permission'
+import type { ResourceLimits } from '@agentnova/contracts'
 
 // ─── Token Pricing ─────────────────────────────────────────────────
 

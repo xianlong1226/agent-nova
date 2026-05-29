@@ -244,19 +244,20 @@ import { fsTools, shellTools } from 'agentnova'
 ## 权限模块
 
 > `import { PermissionGuard, DEFAULT_PERMISSION_CONFIG } from 'agentnova'`
+>
+> 共享类型（`PermissionConfig` / `PermissionLevel` / `ApprovalRequest` / `ToolPermission` / `SandboxConfig` / `ResourceLimits` / `ToolPreflight` 等）位于 [@agentnova/contracts](https://www.npmjs.com/package/@agentnova/contracts)，通过顶层 `agentnova` 入口转发。
 
 ### PermissionGuard
 
-三级权限守卫：`auto` / `ask` / `deny`。
+负责 mode/rules 决策与审批回调调度；sandbox 作为配置容器传递给各工具的 `preflight` 钩子。
 
 ```typescript
 const guard = new PermissionGuard({
   mode: 'ask',
   rules: [
-    { tool: 'fs.readFile', level: 'read' },         // 读操作自动放行
-    { tool: 'fs.writeFile', level: 'write' },        // 写操作需确认
-    { tool: 'shell.exec', level: 'dangerous' },       // 危险操作
-    { tool: 'shell.exec', level: 'dangerous', scope: ['rm *'], mode: 'deny' },  // 黑名单
+    // 空数组意味着完全由 LEVEL_DEFAULT_MODE 兜底（read=allow / write=ask / dangerous=ask）
+    { tool: 'fs.writeFile', mode: 'allow' },     // 覆写：写文件不再弹审批
+    { tool: 'shell.*',      mode: 'deny' },       // 通配：全部 shell 工具拒绝
   ],
   limits: {
     maxSteps: 50,
@@ -280,7 +281,46 @@ const guard = new PermissionGuard({
 
 | 方法 | 说明 |
 |------|------|
-| `check(request)` | 检查操作是否允许，返回 `ApprovalResult` |
+| `check(request, preflight?)` | 决策入口；可选 `preflight` 为工具自带的沙箱钩子，返回 `'deny'` 可提前拦截；之后走 alwaysAllowed → rules → mode → LEVEL_DEFAULT_MODE 决策链 |
+| `getEffectiveMode(req)` | 返回工具最终生效的 mode（不含 preflight） |
+| `resetAllowAlways(tool?)` | 清空 always-allowed 缓存 |
+| `getSandbox()` | 返回当前沙箱配置 |
+| `static matchToolPattern(pattern, name)` | 工具名通配辅助（支持 `*` / `ns.*`） |
+
+### preflight 钩子
+
+沙箱前置校验随工具走，在 `defineTool` 时设置 `preflight` 字段即可：
+
+```typescript
+import { defineTool, type ToolPreflight } from 'agentnova'
+
+const myPreflight: ToolPreflight = (req, ctx) => {
+  if (!ctx.sandbox.enabled) return { ok: true }
+  if (req.args?.target === 'forbidden') {
+    return { ok: false, reason: 'target not allowed' }
+  }
+  return { ok: true }
+}
+
+export const myTool = defineTool({
+  name: 'demo.action',
+  description: '...',
+  parameters: z.object({ target: z.string() }),
+  permission: { level: 'write' },
+  preflight: myPreflight,
+  execute: async (input, ctx) => { /* ... */ },
+})
+```
+
+内置 `fs.*` / `shell.exec` 工具已内置对应 preflight（路径白名单、文件大小、命令黑名单），无需额外配置。
+
+### 注册期 Lint
+
+`Agent` 构造期会静默调用 `lintPermissions()`，对以下情况输出 `logger.warn`（不抛错）：
+
+- `rules` 引用了未注册的工具名（通配符除外）
+- `dangerous` 级别工具被某条 rule 设为 `allow`
+- `read` 级别工具被某条 rule 设为 `deny`
 
 ---
 

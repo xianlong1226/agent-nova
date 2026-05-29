@@ -35,10 +35,19 @@
 │  │  tools       │  │  permission  │  │  memory      │  │
 │  │              │  │              │  │              │  │
 │  │ Registry     │  │ Guard        │  │ Working      │  │
-│  │ Engine       │  │ Sandbox      │  │ Project      │  │
-│  │ Built-in     │  │ Approval     │  │ LongTerm     │  │
-│  │  fs/shell    │  │  callback    │  │  (sql.js)    │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│  │ Engine       │  │ (mode/rules) │  │ Project      │  │
+│  │ Built-in     │  │ Sandbox cfg  │  │ LongTerm     │  │
+│  │  fs/shell    │  │ Approval     │  │  (sql.js)    │  │
+│  │ + preflight  │  │  callback    │  │              │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────────────┘  │
+│         │                 │                            │
+│         └─────────┬───────┘                            │
+│                   ▼                                    │
+│         ┌─────────────────────┐                        │
+│         │ @agentnova/contracts│                        │
+│         │  共享类型契约       │                        │
+│         │  (零运行时依赖)     │                        │
+│         └─────────────────────┘                        │
 │                                                         │
 │  ┌──────────────┐  ┌──────────────┐                     │
 │  │@agentnova/   │  │@agentnova/   │                     │
@@ -62,11 +71,12 @@
 ### 依赖关系
 
 ```
+contracts ← tools, permission, memory, providers, core
 core → tools, permission, memory, providers
 agentnova → core → (所有子包)
 ```
 
-子包之间**零循环依赖**。tools、permission、memory、providers 各自自包含类型定义，只向外暴露接口。
+子包之间**零循环依赖**。共享类型（权限、工具、沙箱、限额）统一在 `@agentnova/contracts` 中声明，其它包通过 `import type` 引用并 re-export 转发，确保单一源真理。
 
 ---
 
@@ -273,26 +283,54 @@ score = base × 0.5 ^ (age_hours / halflife)
     └─ 无回调 → deny
 ```
 
-### 沙箱检查（在审批之前）
+### 沙箱检查（preflight 钩子）
 
-| 检查 | 工具 | 规则 |
-|------|------|------|
-| 路径白名单 | `fs.*` | 文件路径必须在 `allowedDirs` 内 |
-| 命令黑名单 | `shell.exec` | 精确匹配 + 正则匹配 `blockedCommandPatterns` |
-| 文件大小 | `fs.writeFile` | 写入内容不超过 `maxFileSize` |
+沙箱前置校验由各工具自身的 `ToolDefinition.preflight` 钩子实现，`PermissionGuard` 不再硬编码工具名。`Agent.executeToolCall` 在调用 `guard.check(req, toolDef.preflight)` 时把 `preflight` 作为第二参下传，`PermissionGuard` 负责把当前 `sandbox` 配置注入回调上下文。
+
+```typescript
+export type PreflightResult = { ok: true } | { ok: false; reason: string }
+export interface ToolPreflightCtx { sandbox: SandboxConfig }
+export type ToolPreflight = (req: ApprovalRequest, ctx: ToolPreflightCtx) => PreflightResult
+```
+
+内置工具自带的 preflight：
+
+| 工具 | preflight | 规则 |
+|------|-----------|------|
+| `fs.readFile` / `fs.listDir` / `fs.stat` | `pathPreflight` | 路径必须落在 `sandbox.allowedDirs` 内 |
+| `fs.writeFile` | `composePreflights(pathPreflight, sizePreflight)` | 路径白名单 + `args.content` 长度 ≤ `sandbox.maxFileSize` |
+| `shell.exec` | `commandPreflight` | 命令不在 `blockedCommands` 与 `blockedCommandPatterns` 中 |
+
+第三方工具如需沙箱拦截，自行在 `defineTool` 时实现 `preflight` 即可，不再需要改动 permission 包。
 
 ### 默认规则
 
 ```typescript
-// 生产环境的合理默认值
-{ tool: 'fs.readFile',  mode: 'allow' },     // 读取总安全
-{ tool: 'fs.listDir',   mode: 'allow' },     // 列目录总安全
-{ tool: 'fs.stat',      mode: 'allow' },     // 查看属性总安全
-{ tool: 'web.fetch',    mode: 'allow' },     // 网络请求总安全
-{ tool: 'web.search',   mode: 'allow' },     // 搜索总安全
-{ tool: 'fs.writeFile', mode: 'ask' },        // 写文件需确认
-{ tool: 'shell.exec',   mode: 'ask' },        // 执行命令需确认
+// contracts/DEFAULT_PERMISSION_CONFIG
+{
+  mode: 'ask',
+  rules: [],            // 空规则 → 完全由 LEVEL_DEFAULT_MODE 兜底
+  sandbox: DEFAULT_SANDBOX,
+  limits: DEFAULT_LIMITS,
+}
+
+// LEVEL_DEFAULT_MODE 兜底
+read      → allow
+write     → ask
+dangerous → ask
 ```
+
+用户可通过 `rules` 覆写：例如 `{ tool: 'fs.writeFile', mode: 'allow' }` 把写文件改为自动放行；通配符 `'fs.*'` / `'*'` 也支持。
+
+### 注册期 Lint（D 方案）
+
+`Agent` 构造期会调用 `lintPermissions()` 静态校验：
+
+- `rules` 引用了未注册工具 → `logger.warn('[permission] rule references unknown tool', ...)`
+- `dangerous` 工具被某条 rule 设为 `allow` → `logger.warn('[permission] dangerous tool unconditionally allowed by rule', ...)`
+- `read` 工具被某条 rule 设为 `deny` → `logger.warn('[permission] read-only tool denied by rule', ...)`
+
+Lint 不抛错，仅写日志；通配符规则不参与第一条检查。
 
 ---
 

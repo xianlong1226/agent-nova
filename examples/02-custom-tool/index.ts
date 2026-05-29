@@ -20,12 +20,14 @@ import {
   createOpenAICompatibleProvider,
   defineTool,
   fsTools,
+  type ApprovalRequest,
+  type ToolPreflight,
 } from 'agentnova'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 
 // ─── 交互式权限审批 ASK 回调 ───────────────────────────────────────
-async function askApproval(req: { tool: string; args: Record<string, unknown>; permission: { level: string } }) {
+async function askApproval(req: ApprovalRequest) {
   const rl = readline.createInterface({ input, output })
   try {
     console.log('\n⚠️  需要授权：工具 「' + req.tool + '」 (级别: ' + req.permission.level + ')')
@@ -52,6 +54,16 @@ const weatherTool = defineTool({
     level: 'read',
     description: '查询天气信息（只读）',
   },
+  // preflight 钩子：在审批/执行前拦截不在白名单中的城市
+  // 与内置 fs/shell 工具一样，第三方工具可自行提供沙箱级预检查
+  preflight: ((req) => {
+    const allowedCities = ['北京', '上海', '深圳', '杭州']
+    const city = (req.args as { city?: string }).city
+    if (city && !allowedCities.includes(city)) {
+      return { ok: false, reason: `weather.query 仅支持 ${allowedCities.join('/')}` }
+    }
+    return { ok: true }
+  }) satisfies ToolPreflight,
   execute: async ({ city, unit }) => {
     // 模拟天气数据（实际应用中调用真实 API）
     const mockData: Record<string, { temp: number; condition: string }> = {

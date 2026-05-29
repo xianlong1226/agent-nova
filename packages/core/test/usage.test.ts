@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { UsageTracker, ResourceLimitError, getPricing, PROVIDER_PRICING } from '../src/usage.js'
-import { DEFAULT_LIMITS } from '@agentnova/permission'
+import { DEFAULT_LIMITS } from '@agentnova/contracts'
 
 describe('UsageTracker', () => {
   it('should track token usage', () => {

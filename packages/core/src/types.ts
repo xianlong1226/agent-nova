@@ -1,6 +1,7 @@
 import type { CoreMessage } from 'ai'
 import type { ToolDefinition, ToolCall, ToolResult, ToolContext, AgentStateSnapshot, ToolLogger } from '@agentnova/tools'
-import type { PermissionGuard, PermissionConfig, ResourceLimits } from '@agentnova/permission'
+import type { PermissionGuard } from '@agentnova/permission'
+import type { PermissionConfig, ResourceLimits } from '@agentnova/contracts'
 import type { ProviderRouter, ProviderConfig } from '@agentnova/providers'
 import type { UsageSnapshot } from './usage.js'
 import type { LongTermMemoryConfig } from '@agentnova/memory'

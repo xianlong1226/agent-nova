@@ -32,6 +32,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@agentnova/contracts": "workspace:*",
     "@agentnova/tools": "workspace:*",
     "@agentnova/permission": "workspace:*",
     "@agentnova/memory": "workspace:*",

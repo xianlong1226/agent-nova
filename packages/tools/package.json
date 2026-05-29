@@ -32,6 +32,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@agentnova/contracts": "workspace:*",
     "zod": "^3.24.0"
   },
   "devDependencies": {

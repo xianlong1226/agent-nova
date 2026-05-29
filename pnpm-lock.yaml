@@ -166,6 +166,9 @@ importers:
 
   packages/agentnova:
     dependencies:
+      '@agentnova/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@agentnova/core':
         specifier: workspace:*
         version: link:../core
@@ -195,8 +198,23 @@ importers:
         specifier: ^3.1.0
         version: 3.2.4(@types/node@22.19.19)(tsx@4.22.3)
 
+  packages/contracts:
+    devDependencies:
+      tsup:
+        specifier: ^8.4.0
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.3)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.1.0
+        version: 3.2.4(@types/node@22.19.19)(tsx@4.22.3)
+
   packages/core:
     dependencies:
+      '@agentnova/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@agentnova/memory':
         specifier: workspace:*
         version: link:../memory
@@ -250,6 +268,9 @@ importers:
 
   packages/permission:
     dependencies:
+      '@agentnova/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -310,6 +331,9 @@ importers:
 
   packages/tools:
     dependencies:
+      '@agentnova/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       zod:
         specifier: ^3.24.0
         version: 3.25.76

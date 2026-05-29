@@ -38,9 +38,10 @@ agent-nova/
 
 | 包名 | 职责 | 主要导出 |
 |------|------|---------|
+| [@agentnova/contracts](./packages/contracts) | 共享类型契约（零运行时依赖），权限/工具/沙箱/限额相关类型与默认常量 | `PermissionLevel`、`PermissionConfig`、`ToolPermission`、`ApprovalRequest`、`SandboxConfig`、`ResourceLimits`、`ToolPreflight`、`DEFAULT_LIMITS`、`DEFAULT_SANDBOX`、`LEVEL_DEFAULT_MODE` |
 | [@agentnova/core](./packages/core) | Agent 主循环、上下文管理、会话、追踪、错误体系 | `Agent`、`ContextManager`、`SessionManager`、`UsageTracker`、`TraceCollector`、`StructuredLogger`、`AgentError` |
-| [@agentnova/tools](./packages/tools) | 工具注册、执行引擎、内置 fs/shell 工具 | `ToolRegistry`、`ToolEngine`、`defineTool`、`fsTools`、`shellTools` |
-| [@agentnova/permission](./packages/permission) | 权限决策、沙箱、命令黑名单、审批回调 | `PermissionGuard`、规则与沙箱类型 |
+| [@agentnova/tools](./packages/tools) | 工具注册、执行引擎、内置 fs/shell 工具（含沙箱 preflight 钩子） | `ToolRegistry`、`ToolEngine`、`defineTool`、`fsTools`、`shellTools` |
+| [@agentnova/permission](./packages/permission) | 权限决策（mode/rules/审批回调）、sandbox 配置容器；沙箱前置校验由各工具的 `preflight` 实现 | `PermissionGuard`、`DEFAULT_PERMISSION_CONFIG` |
 | [@agentnova/memory](./packages/memory) | 三层记忆 + 语义注入 + 重要性衰减 | `WorkingMemory`、`ProjectMemory`、`LongTermMemory`、`MemoryInjector` |
 | [@agentnova/providers](./packages/providers) | Provider 路由、降级链、限流 | `createRouter`、`createOpenAICompatibleProvider`、`RateLimiter`、`ProviderRouter` |
 | [@agentnova/skills](./packages/skills) | 技能加载、注册、运行时激活、发布 | `SkillLoader`、`SkillRegistry`、`SkillLoaderWorker` |
@@ -52,11 +53,13 @@ agent-nova/
 
 ```
 agentnova ──→ core ──→ tools / permission / memory / providers / skills
+                       │       │
+                       └───────┴──→ contracts (共享类型契约)
               │
               └──→ (Vercel AI SDK: ai + @ai-sdk/*)
 ```
 
-子包之间零循环依赖，每个子包自包含类型定义，对外暴露最小接口。
+子包之间零循环依赖。`@agentnova/contracts` 作为类型契约源单点，承载权限/工具/沙箱共享类型，其它包通过转发的方式对外保持原有 API。
 
 ## 技术栈
 
@@ -196,7 +199,7 @@ agentnova create my-agent
 
 | 模块 | 测试数 |
 |------|-------|
-| @agentnova/core | 48 |
+| @agentnova/core | 52+ |
 | @agentnova/permission | 13 |
 | @agentnova/memory | 22 |
 | @agentnova/tools | 7 |

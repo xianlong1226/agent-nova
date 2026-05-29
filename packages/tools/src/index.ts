@@ -1,14 +1,17 @@
-// ─── Types ─────────────────────────────────────────────────────────
+// ─── Types (forwarded from @agentnova/contracts via ./types) ───────
 export type {
   PermissionLevel,
   ToolPermission,
+  ApprovalRequest,
+  ApprovalResult,
+  ApprovalFn,
+  ToolPreflight,
+  ToolPreflightCtx,
+  PreflightResult,
   ToolContext,
   ToolDefinition,
   ToolCall,
   ToolResult,
-  ApprovalFn,
-  ApprovalRequest,
-  ApprovalResult,
   AgentStateSnapshot,
   ToolLogger,
 } from './types.js'

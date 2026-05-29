@@ -22,13 +22,14 @@ import {
   createOpenAICompatibleProvider,
   fsTools,
   shellTools,
+  type ApprovalRequest,
 } from 'agentnova'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 
 // ─── 交互式权限审批 ASK 回调 ───────────────────────────────────────
 // 调用敏感工具（shell.exec / fs.writeFile 等）时弹出询问
-async function askApproval(req: { tool: string; args: Record<string, unknown>; permission: { level: string } }) {
+async function askApproval(req: ApprovalRequest) {
   const rl = readline.createInterface({ input, output })
   try {
     console.log('\n⚠️  需要授权：工具 「' + req.tool + '」 (级别: ' + req.permission.level + ')')
@@ -102,7 +103,7 @@ async function main() {
     },
   })
 
-  const prompt = process.argv[2] ?? '你好，帮我看看当前目录有什么文件'
+  const prompt = process.argv[2] ?? '你好，帮我看看电脑上都安装了哪些软件'
   console.log(`📝 Prompt: ${prompt}\n`)
 
   const result = await agent.run(prompt, {

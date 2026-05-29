@@ -2,8 +2,9 @@ import { generateText, streamText, type CoreMessage, type Tool } from 'ai'
 import { z } from 'zod'
 import { ToolRegistry, ToolEngine } from '@agentnova/tools'
 import type { ToolDefinition, ToolCall, ToolResult } from '@agentnova/tools'
-import { PermissionGuard, DEFAULT_PERMISSION_CONFIG, DEFAULT_LIMITS } from '@agentnova/permission'
-import type { PermissionConfig, ResourceLimits, ApprovalRequest } from '@agentnova/permission'
+import { PermissionGuard, DEFAULT_PERMISSION_CONFIG } from '@agentnova/permission'
+import { DEFAULT_LIMITS } from '@agentnova/contracts'
+import type { PermissionConfig, ResourceLimits, ApprovalRequest } from '@agentnova/contracts'
 import { ProviderRouter } from '@agentnova/providers'
 import { ContextManager, DEFAULT_CONTEXT_CONFIG } from './context.js'
 import { UsageTracker, getPricing, ResourceLimitError, type UsageSnapshot } from './usage.js'
@@ -108,6 +109,9 @@ export class Agent {
 
     this.tracer = new TraceCollector(provider.id)
     this.logger = new StructuredLogger({ traceId: this.tracer['traceId'] })
+
+    // logger 就绪后才能 lint（警告会走 logger.warn）
+    this.lintPermissions()
 
     // Init memory
     this.workingMemory = new WorkingMemory()
@@ -528,7 +532,7 @@ export class Agent {
       permission: toolDef?.permission ?? { level: 'dangerous' as const },
     }
 
-    const approval = await this.guard.check(approvalRequest)
+    const approval = await this.guard.check(approvalRequest, toolDef?.preflight)
     if (approval === 'deny') {
       this.emit('tool:denied', { tool: call.tool, args: call.args })
       return { tool: call.tool, output: null, error: `Permission denied for "${call.tool}"`, durationMs: 0, approved: false }
@@ -589,6 +593,40 @@ export class Agent {
   }
 
   // ─── Private Helpers ─────────────────────────────────────────────
+
+  /**
+   * Static lint at construction time: surfaces config drift between
+   * `permissions.rules` and the registered tool set without throwing.
+   */
+  private lintPermissions(): void {
+    const registered = new Set(this.registry.list())
+
+    for (const r of this.permissions.rules) {
+      const isPattern = r.tool === '*' || r.tool.endsWith('.*')
+      if (!isPattern && !registered.has(r.tool)) {
+        this.logger.warn('[permission] rule references unknown tool', { tool: r.tool, mode: r.mode })
+      }
+    }
+
+    for (const tool of this.registry.getAll()) {
+      const matched = this.permissions.rules.find((r) =>
+        PermissionGuard.matchToolPattern(r.tool, tool.name)
+      )
+      if (!matched) continue
+      if (tool.permission.level === 'dangerous' && matched.mode === 'allow') {
+        this.logger.warn('[permission] dangerous tool unconditionally allowed by rule', {
+          tool: tool.name,
+          rule: matched.tool,
+        })
+      }
+      if (tool.permission.level === 'read' && matched.mode === 'deny') {
+        this.logger.warn('[permission] read-only tool denied by rule', {
+          tool: tool.name,
+          rule: matched.tool,
+        })
+      }
+    }
+  }
 
   private buildAITools(): Record<string, Tool> {
     // Merge built-in tools + skill tools

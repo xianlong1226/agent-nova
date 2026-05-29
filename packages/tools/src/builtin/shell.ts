@@ -1,8 +1,37 @@
 import { z } from 'zod'
-import { defineTool } from '../types.js'
+import { defineTool, type ToolPreflight, type PreflightResult } from '../types.js'
 import { exec } from 'child_process'
 import { resolve } from 'path'
 import type { ToolContext } from '../types.js'
+
+// ─── shell command preflight ───────────────────────────────────────
+
+const commandPreflight: ToolPreflight = (req, { sandbox }): PreflightResult => {
+  const command = req.args.command as string | undefined
+  if (!command) return { ok: true }
+
+  // Exact substring blocklist
+  const blocked = sandbox.blockedCommands ?? []
+  for (const b of blocked) {
+    if (command.includes(b)) {
+      return { ok: false, reason: `command matches blockedCommands entry "${b}"` }
+    }
+  }
+
+  // Regex pattern blocklist
+  const patterns = sandbox.blockedCommandPatterns ?? []
+  for (const p of patterns) {
+    try {
+      if (new RegExp(p, 'i').test(command)) {
+        return { ok: false, reason: `command matches blockedCommandPatterns "${p}"` }
+      }
+    } catch {
+      // ignore invalid pattern
+    }
+  }
+
+  return { ok: true }
+}
 
 // ─── shell.exec ────────────────────────────────────────────────────
 
@@ -20,6 +49,7 @@ export const shellExec = defineTool({
     scope: ['*'],
     description: 'Execute arbitrary shell commands',
   },
+  preflight: commandPreflight,
   execute: async (input: { command: string; cwd?: string; timeout: number }, ctx: ToolContext) => {
     const resolvedCwd = input.cwd ? resolve(ctx.workingDir, input.cwd) : ctx.workingDir
     ctx.logger.info('Executing command', { command: input.command, cwd: resolvedCwd })

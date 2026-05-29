@@ -44,22 +44,32 @@ export type {
   ToolCall,
   ToolResult,
   ToolContext,
+} from '@agentnova/tools'
+
+// Permission
+export { PermissionGuard, DEFAULT_PERMISSION_CONFIG } from '@agentnova/permission'
+
+// Contracts (single source of truth for permission/tools/sandbox/limits types)
+export {
+  DEFAULT_LIMITS,
+  DEFAULT_SANDBOX,
+  LEVEL_DEFAULT_MODE,
+} from '@agentnova/contracts'
+export type {
   ToolPermission,
   PermissionLevel,
   ApprovalFn,
   ApprovalRequest,
   ApprovalResult,
-} from '@agentnova/tools'
-
-// Permission
-export { PermissionGuard, DEFAULT_PERMISSION_CONFIG, DEFAULT_LIMITS } from '@agentnova/permission'
-export type {
   PermissionMode,
   PermissionRule,
   PermissionConfig,
   SandboxConfig,
   ResourceLimits,
-} from '@agentnova/permission'
+  ToolPreflight,
+  ToolPreflightCtx,
+  PreflightResult,
+} from '@agentnova/contracts'
 
 // Memory
 export {
@@ -107,7 +117,7 @@ interface QuickAgentConfig {
   /** Additional tools */
   tools?: ToolDefinition[]
   /** Permission config override */
-  permissions?: Partial<import('@agentnova/permission').PermissionConfig>
+  permissions?: Partial<import('@agentnova/contracts').PermissionConfig>
   /** Include built-in fs tools? Default: true */
   includeFsTools?: boolean
   /** Include built-in shell tools? Default: true */
