@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { ToolPermission, ApprovalFn, ToolPreflight } from '@agentnova/contracts'
+import type { ToolPermission, ApprovalFn, ToolPreflight, SandboxConfig } from '@agentnova/contracts'
 
 // Forward ALL shared contract types so tool authors can import everything from '@agentnova/tools'.
 // Using wildcard re-export keeps this list auto-synced with @agentnova/contracts — no manual drift.
@@ -25,6 +25,8 @@ export interface ToolContext {
   abortSignal: AbortSignal
   askApproval: ApprovalFn
   logger: ToolLogger
+  /** Sandbox config for runtime checks (e.g. domain whitelist) during tool execution */
+  sandbox?: SandboxConfig
 }
 
 // ─── Tool Definition ───────────────────────────────────────────────

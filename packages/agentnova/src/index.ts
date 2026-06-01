@@ -38,12 +38,14 @@ export type { SessionData, SessionConfig } from '@agentnova/core'
 
 // Tools
 export { ToolRegistry, ToolEngine, defineTool } from '@agentnova/tools'
-export { fsTools, shellTools } from '@agentnova/tools'
+export { fsTools, shellTools, webSearchTools, webSearch, createWebSearchTool } from '@agentnova/tools'
 export type {
   ToolDefinition,
   ToolCall,
   ToolResult,
   ToolContext,
+  WebSearchResult,
+  SearchProvider,
 } from '@agentnova/tools'
 
 // Permission
