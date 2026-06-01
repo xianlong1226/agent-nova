@@ -552,6 +552,7 @@ export class Agent {
       this.getSnapshot(), this.workingDir,
       signal ?? new AbortController().signal,
       (req: ApprovalRequest) => this.guard.check(req),
+      this.permissions.sandbox,
     )
 
     const toolResult = await this.engine.execute(call, toolCtx)

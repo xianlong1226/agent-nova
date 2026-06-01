@@ -41,6 +41,8 @@ export interface SandboxConfig {
   blockedCommandPatterns?: string[]
   maxFileSize?: number
   maxOutputLength?: number
+  /** Allowed domains for web.search results; undefined/empty means no restriction */
+  allowedSearchDomains?: string[]
 }
 
 export interface ResourceLimits {

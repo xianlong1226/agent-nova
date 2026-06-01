@@ -11,3 +11,5 @@ export { ToolRegistry, ToolEngine } from './registry.js'
 // ─── Built-in Tools ────────────────────────────────────────────────
 export { fsTools, readFile, writeFile, listDir, fsStat } from './builtin/fs.js'
 export { shellTools, shellExec } from './builtin/shell.js'
+export { webSearchTools, webSearch, createWebSearchTool } from './builtin/web.js'
+export type { WebSearchResult, SearchProvider } from './builtin/web.js'

@@ -189,6 +189,7 @@ export function createToolContext(
   workingDir: string,
   abortSignal: AbortSignal,
   approvalFn: (request: any) => Promise<any>,
+  sandbox?: any,
 ): any {
   return {
     agentState: state,
@@ -196,5 +197,6 @@ export function createToolContext(
     abortSignal,
     askApproval: approvalFn,
     logger: new ConsoleToolLogger(),
+    sandbox,
   }
 }
